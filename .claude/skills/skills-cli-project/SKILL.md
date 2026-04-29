@@ -33,7 +33,19 @@ A Rust CLI that lets a developer maintain **one personal repo of Claude skills**
 - **Repo:** `umanio-agency/skills-cli` — **private until v1**, then public.
 - **CLI language:** English. All user-facing strings (help text, prompts, error messages, log output) are in English regardless of the developer's working language.
 
-Dependency choices are tracked in §7 (open questions) until decided.
+### 3.1 Dependencies
+
+| Concern | Choice | Notes |
+|---|---|---|
+| Argument parsing | `clap` v4 (`derive`) | Subcommand-based CLI. |
+| Interactive prompts | `inquire` | Multi-select with built-in fuzzy filter. |
+| Directory walking | `ignore` (engine behind `ripgrep`) | Honours `.gitignore`; skips `node_modules`/`target`/`.git` by default. |
+| Config (de)serialization | `serde` (`derive`) + `toml` | TOML for both global and per-project config. |
+| Platform paths | `directories` | Portable XDG paths for cache/config dirs. |
+| Error handling | `anyhow` at the binary edge | Add `thiserror` later only if a caller needs to match variants. |
+| Git access | **Shell out to `git`** via `std::process::Command`, encapsulated in a `git` module | Reuses the user's existing auth (gh helper, SSH agent). Swap to `gix` later if needed. |
+
+Sync only — no `tokio`. No colour/logging crate yet; `inquire` styles its own prompts and we use plain `println!` until a real need arises.
 
 ## 4. Domain model
 
@@ -98,7 +110,7 @@ Each selected skill is copied into `<destination>/<skill-name>/` (preserving the
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 - `[x]` **Phase 0 — Bootstrap.** Repo created (private), Rust binary crate scaffolded, README/LICENSE/`.gitignore`, `.claude/CLAUDE.md`, this reference skill.
-- `[ ]` **Phase 1 — Foundations.** Pick crates (CLI, prompts, git, config). Wire up `clap` skeleton with subcommand stubs. Define error type.
+- `[~]` **Phase 1 — Foundations.** Crates picked (see §3.1). `clap` skeleton wired with five subcommand stubs (`init`, `list`, `add`, `push`, `detect`) — each returns `Ok` after a placeholder `println!`. Module layout: `src/main.rs` → `src/cli.rs` (clap defs) + `src/commands/{init,list,add,push,detect}.rs`. `cargo build` and `cargo clippy --all-targets -- -D warnings` are clean. Error type formalisation deferred — `anyhow` is enough until a real need surfaces.
 - `[ ]` **Phase 2 — Library link + listing.** `skills init`, `skills list`. Cache + clone/fetch logic. `SKILL.md` discovery via `walkdir`.
 - `[ ]` **Phase 3 — Install.** `skills add` with interactive multi-select. Copy skill folder, write `.skills.toml` with source commit SHA.
 - `[ ]` **Phase 4 — Push back.** `skills push` — diff installed skill vs library, commit + push. Detect divergence (when both sides changed) and surface conflict resolution.
@@ -107,11 +119,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 7. Open questions / decisions still needed
 
-- **CLI library:** `clap` (derive) is the obvious default. Confirm before Phase 1.
-- **Interactive prompts:** `inquire` vs `dialoguer` for multi-select. `inquire` has a nicer DX; `dialoguer` is the older standard.
-- **Git access:** `git2` (libgit2 bindings, mature but C dep), `gix` (pure Rust, modern but younger), or shell out to `git` (simplest, depends on system git). Trade-off: pure-Rust portability vs implementation effort.
-- **Config format:** TOML assumed. Confirm.
-- **Cache location:** `~/.cache/skills-cli/` vs `~/.claude/skills-cli/cache/`. The `.cache` XDG path is the standard answer on Linux/macOS.
+- **Cache location:** `~/.cache/skills-cli/` (resolved via `directories`) vs `~/.claude/skills-cli/cache/`. Leaning XDG `.cache`. Confirm before Phase 2.
 - **`.skills.toml` schema:** what to record per installed skill — source commit SHA, install timestamp, source path within the library, **destination path within the project** (so subsequent `add` runs can default to the same root)?
 - **Auth for private library repos:** assume the user has `gh` or SSH keys set up, or do we wrap something? Initial answer: assume the host's git credentials work (don't reinvent auth).
 - **Should the install destination be remembered?** After the first `skills add`, do later runs default to the same destination silently, or always re-prompt? Likely: remember and re-prompt only if `--reselect` is passed.
@@ -127,6 +135,8 @@ Append-only. Date each entry. When a decision is later reversed, add a new entry
 - **2026-04-29** — This reference skill (`skills-cli-project`) is the canonical source for project state. Update it as work progresses.
 - **2026-04-29** — **CLI language is English** (help, prompts, errors, logs). Documentation may be bilingual later, but the binary itself ships English-only.
 - **2026-04-29** — **Install destination is interactive, never hardcoded.** On `skills add`, recursively scan cwd for folders named `skills` (any depth, respecting common ignore rules) and let the user pick. If none are found, offer four presets — `.claude/skills`, `.codex/skills`, `.cursor/skills`, `.agents/skills` — plus a custom-path option. The custom-path option is also offered when matches *are* found, so the user can override.
+- **2026-04-29** — **Phase 1 dependency stack confirmed:** `clap` (derive), `inquire`, `serde` + `toml`, `ignore`, `directories`, `anyhow`. Git operations go through a thin internal `git` module that **shells out to `git`** (rationale: reuses the user's existing auth — gh credential helper, SSH agent — without reimplementing it). Sync only, no async runtime. No logging or colour crate yet.
+- **2026-04-29** — **Module layout:** `src/main.rs` (entry + dispatch), `src/cli.rs` (clap definitions), `src/commands/{init,list,add,push,detect}.rs` (one file per subcommand, each exposing `pub fn run(args) -> Result<()>`). Domain modules (`config`, `git`, `skill`) will be added in the phase that needs them — not pre-created.
 
 ## 9. How to use this skill
 
