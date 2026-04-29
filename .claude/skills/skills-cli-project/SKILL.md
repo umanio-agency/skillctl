@@ -117,6 +117,8 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - `[ ]` **Phase 5 — Fork + detect.** `skills push --as-new` (or interactive prompt) for forking. `skills detect` for new local skills.
 - `[ ]` **Phase 6 — Polish & open source.** Help text, error messages, README usage section, CI (lint + test), publish public, optional crates.io release.
 
+> **Backlog (post-v1, see §10):** skill tags, progressive-filter multi-select prompt.
+
 ## 7. Open questions / decisions still needed
 
 - **Auth for private library repos:** assume the user has `gh` or SSH keys set up, or do we wrap something? Initial answer: assume the host's git credentials work (don't reinvent auth).
@@ -157,4 +159,36 @@ When starting a session on skills-cli:
 1. Read this file first to load full context.
 2. Cross-check **§6 Roadmap** for what's done vs next.
 3. Cross-check **§7 Open questions** before proposing any design that touches an undecided area.
-4. After a meaningful change (new decision, milestone reached, roadmap revision), **update this file** in the same change set — ideally in the same commit as the work that prompted the update.
+4. Cross-check **§10 Backlog** before pitching a "new" feature — it may already be parked there with prior framing.
+5. After a meaningful change (new decision, milestone reached, roadmap revision), **update this file** in the same change set — ideally in the same commit as the work that prompted the update.
+
+## 10. Backlog (future ideas, not yet scheduled)
+
+Ideas the user wants to explore but that aren't on a phase yet. Each entry lists the idea, the value, and the open design questions / known blockers — so when we *do* schedule them we don't restart from a blank page.
+
+### 10.1 Skill tags
+
+- **Raised:** 2026-04-30.
+- **Idea:** Allow tagging skills (e.g. `images-gen`, `code-review`) to categorize them, and let the user install every skill carrying a given tag in one shot (`skills add --tag images-gen` → bulk install).
+- **Value:** Bootstrap a project for a specific workflow without clicking through a multi-select for ten related skills.
+- **Open design questions:**
+  - **Where do tags live?** Strong default: in the `SKILL.md` frontmatter (`tags: [a, b, c]`) — discoverable, lives with the skill content, replicates naturally on clone/copy. Alternative: a `tags.toml` at the library root, useful if we want centralised tag definitions/aliases.
+  - **CLI shape:** likely both — `skills add --tag <name>` for a non-interactive bulk install, *and* a tag-aware filter in the interactive multi-select (chips or a tag-prefixed query like `tag:images-gen`).
+  - **Management:** edit-the-frontmatter-manually, or expose `skills tag add/remove`?
+  - **Composition:** does an `--tag a --tag b` mean union or intersection? Probably union (more useful default), with an opt-in `--all-tags` for intersection.
+
+### 10.2 Progressive-filter multi-select prompt
+
+- **Raised:** 2026-04-30.
+- **Idea:** Replace the current `cliclack::multiselect` with a prompt that has a live search bar:
+  1. Type → list filters in real time.
+  2. ↑/↓ navigates the filtered list.
+  3. Enter while typing in the search → adds the focused skill to the running selection **without** ending the prompt.
+  4. The user can then clear the filter, type a new query, navigate, hit Enter again, etc., building up the selection iteratively.
+  5. A separate key (Esc/Tab/`>`/explicit "Done" item) finalises and triggers the install.
+- **Value:** Much faster bulk selection in large libraries — no scrolling through unrelated skills.
+- **Known blockers / options:**
+  - `cliclack`'s default `multiselect` uses Space to toggle and Enter to confirm; no built-in live-filter input.
+  - `inquire`'s multi-select had a `fuzzy` feature (we left it behind in the cliclack swap), but Enter still meant "confirm everything" — the *additive* Enter semantics is non-standard and AFAIK no off-the-shelf prompt provides it.
+  - Likely paths when we get there: (a) build a custom prompt with `ratatui` + `crossterm` (full control, larger investment), (b) revisit `inquire`/`dialoguer` for filter + custom key bindings, (c) layer a small TUI on top of cliclack just for this prompt while keeping the rest of the cliclack flow.
+  - **Cross-cutting with §10.1:** filter input should match on name *and* tags, so the two features land naturally in one prompt.
