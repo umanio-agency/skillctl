@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Skill {
-    #[allow(dead_code)]
     pub path: PathBuf,
     pub name: String,
     pub description: Option<String>,
