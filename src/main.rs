@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod git;
+mod project_config;
 mod skill;
 
 use anyhow::Result;

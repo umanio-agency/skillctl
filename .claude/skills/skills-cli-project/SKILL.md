@@ -112,17 +112,18 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - `[x]` **Phase 0 — Bootstrap.** Repo created (private), Rust binary crate scaffolded, README/LICENSE/`.gitignore`, `.claude/CLAUDE.md`, this reference skill.
 - `[x]` **Phase 1 — Foundations.** Crates picked (see §3.1). `clap` skeleton wired with five subcommand stubs. Module layout: `src/main.rs` → `src/cli.rs` (clap defs) + `src/commands/{init,list,add,push,detect}.rs`. `cargo build` and `cargo clippy --all-targets -- -D warnings` clean.
 - `[x]` **Phase 2 — Library link + listing.** `skills init <github-url>` clones the library into a platform-appropriate cache and persists the URL in `config.toml`. `skills list` reads config, best-effort `git fetch && reset --hard @{upstream}` to refresh, walks the cache via `ignore::WalkBuilder` (hidden dirs included so `.claude/skills/` is found), and prints each `SKILL.md`'s `name` + `description` (frontmatter parsed by a tolerant hand-rolled parser — no YAML crate added). Modules introduced: `src/config.rs`, `src/git.rs`, `src/skill.rs`. Eight unit tests covering URL slugging and frontmatter parsing. End-to-end smoke test against `umanio-agency/skills-cli` itself succeeds.
-- `[ ]` **Phase 3 — Install.** `skills add` with interactive multi-select. Copy skill folder, write `.skills.toml` with source commit SHA.
+- `[x]` **Phase 3 — Install.** `skills add` is a fully interactive flow: refresh the library cache, multi-select skills via `inquire::MultiSelect` (one line per skill: `name — description`), resolve the destination per §5.1 (recursive scan for folders named `skills`, ignoring `node_modules`/`target`; falls back to the four-preset Select + Custom path), and copy each chosen skill folder via a hand-rolled recursive copy. On a destination that already exists, prompt **Overwrite / Skip / Abort**. Records each install in `.skills.toml` with the schema agreed in §7. Modules introduced: `src/project_config.rs`. Crate added: `time` (`formatting` feature) for the RFC3339 `installed_at` timestamp. The interactive prompts cannot be exercised from the CLI test harness (they need a real TTY), so manual smoke-testing in a terminal is the validation of last resort.
 - `[ ]` **Phase 4 — Push back.** `skills push` — diff installed skill vs library, commit + push. Detect divergence (when both sides changed) and surface conflict resolution.
 - `[ ]` **Phase 5 — Fork + detect.** `skills push --as-new` (or interactive prompt) for forking. `skills detect` for new local skills.
 - `[ ]` **Phase 6 — Polish & open source.** Help text, error messages, README usage section, CI (lint + test), publish public, optional crates.io release.
 
 ## 7. Open questions / decisions still needed
 
-- **`.skills.toml` schema:** what to record per installed skill — source commit SHA, install timestamp, source path within the library, **destination path within the project** (so subsequent `add` runs can default to the same root)?
 - **Auth for private library repos:** assume the user has `gh` or SSH keys set up, or do we wrap something? Initial answer: assume the host's git credentials work (don't reinvent auth).
-- **Should the install destination be remembered?** After the first `skills add`, do later runs default to the same destination silently, or always re-prompt? Likely: remember and re-prompt only if `--reselect` is passed.
+- **Should the install destination be remembered?** After the first `skills add`, do later runs default to the same destination silently, or always re-prompt? Likely: remember and re-prompt only if `--reselect` is passed. **Currently:** always re-prompts.
 - **Recursive scan depth limit?** No hard limit yet; rely on ignore rules (`.gitignore`, `node_modules`, etc.) to keep it cheap. Revisit if perf is an issue on large monorepos.
+- **Multi-line frontmatter values?** Hand-rolled parser is single-line only. Revisit if real skills need multi-line `description:` blocks.
+- **Pushing back unshallows the cache?** Phase 4 will need full history. Either re-clone without `--depth=1` (we already do this) or `git fetch --unshallow` if we change the clone strategy. Today the cache is a full clone, so this is a non-issue unless we add shallow clones for speed.
 
 ## 8. Decisions log
 
@@ -140,6 +141,9 @@ Append-only. Date each entry. When a decision is later reversed, add a new entry
 - **2026-04-29** — **GitHub-only library URLs in v1.** Accept `https://github.com/owner/repo[.git]` and `git@github.com:owner/repo.git`; reject anything else with a clear error. Other hosts (GitLab, self-hosted) can come post-v1.
 - **2026-04-29** — **Frontmatter parser is hand-rolled and tolerant.** It only extracts `name:` and `description:` from a leading `---`-delimited block, supports single-line values with optional quotes, and ignores anything else. No YAML crate added. Multi-line values are not yet supported — revisit if real-world skills need it.
 - **2026-04-29** — **Cache refresh on `list` is best-effort.** `git fetch --quiet --prune && git reset --quiet --hard @{upstream}` runs before discovery; if it fails (e.g. offline), `list` prints a warning to stderr and falls back to the cached snapshot.
+- **2026-04-29** — **`.skills.toml` schema confirmed:** `[[installed]]` array, each entry has `name`, `source_path` (relative to the library root), `source_sha` (library commit at install time — the anchor used by `push` to detect drift), `destination` (relative to the project root), `installed_at` (RFC3339 UTC).
+- **2026-04-29** — **Conflict policy on `add` when destination exists:** prompt the user with **Overwrite / Skip / Abort** per skill. Abort saves whatever was already installed in this run before exiting cleanly. No flag-based override yet.
+- **2026-04-29** — **`time` crate added** (`formatting` feature) solely for the RFC3339 `installed_at` timestamp. Cheap dependency, well-maintained; preferred over `chrono` for being modern and feature-scoped.
 
 ## 9. How to use this skill
 

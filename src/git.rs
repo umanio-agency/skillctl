@@ -41,6 +41,24 @@ pub fn fetch_and_fast_forward(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn head_sha(repo: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .with_context(|| format!("invoking `git rev-parse HEAD` in {}", repo.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`git rev-parse HEAD` failed in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let sha = String::from_utf8(output.stdout)
+        .context("`git rev-parse HEAD` returned non-UTF8 output")?;
+    Ok(sha.trim().to_string())
+}
+
 fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .current_dir(repo)

@@ -20,4 +20,5 @@ directories = "6.0.0"
 ignore = "0.4.25"
 inquire = "0.9.4"
 serde = { version = "1.0.228", features = ["derive"] }
+time = { version = "0.3.47", features = ["formatting"] }
 toml = "1.1.2"
