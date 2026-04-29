@@ -1,10 +1,9 @@
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use cliclack::{input, intro, log, multiselect, outro, outro_cancel, select};
 use ignore::WalkBuilder;
-use inquire::{MultiSelect, Select, Text};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -14,7 +13,26 @@ use crate::git;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum DestChoice {
+    Existing(PathBuf),
+    Preset {
+        label: &'static str,
+        path: PathBuf,
+    },
+    Custom,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum ConflictAction {
+    Overwrite,
+    Skip,
+    Abort,
+}
+
 pub fn run(_args: AddArgs) -> Result<()> {
+    intro("skills add")?;
+
     let cfg = config::load()?;
     let library = cfg
         .library
@@ -30,24 +48,24 @@ pub fn run(_args: AddArgs) -> Result<()> {
     }
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        eprintln!("warning: could not refresh library cache ({e}); using cached version");
+        log::warning(format!(
+            "could not refresh library cache ({e}); using cached version"
+        ))?;
     }
+
     let skills = skill::discover(&library_root)?;
     if skills.is_empty() {
-        println!("no skills found in {}", library.url);
+        outro(format!("no skills found in {}", library.url))?;
         return Ok(());
     }
 
-    let choices: Vec<SkillChoice> = skills.into_iter().map(SkillChoice::from).collect();
-    let selected = MultiSelect::new(
-        "Skills to install (space to toggle, enter to confirm):",
-        choices,
-    )
-    .prompt()?;
-    if selected.is_empty() {
-        println!("no skills selected; nothing to do.");
-        return Ok(());
+    let mut prompt = multiselect("Skills to install")
+        .required(true);
+    for s in &skills {
+        let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+        prompt = prompt.item(s.clone(), &s.name, hint);
     }
+    let selected: Vec<Skill> = prompt.interact()?;
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let existing = find_existing_skills_folders(&cwd)?;
@@ -59,9 +77,10 @@ pub fn run(_args: AddArgs) -> Result<()> {
         .context("formatting installation timestamp")?;
 
     let mut project_cfg = project_config::load(&cwd)?;
+    let mut installed_count = 0usize;
+    let mut skipped_count = 0usize;
 
-    for choice in selected {
-        let skill = choice.skill;
+    for skill in selected {
         let folder_name = skill
             .path
             .file_name()
@@ -69,29 +88,41 @@ pub fn run(_args: AddArgs) -> Result<()> {
         let dest = dest_root.join(folder_name);
 
         if dest.exists() {
-            let action = Select::new(
-                &format!(
-                    "`{}` already exists. What do you want to do?",
-                    dest.display()
-                ),
-                vec!["Overwrite", "Skip", "Abort"],
+            let action = select(format!(
+                "`{}` already exists — what do you want to do?",
+                dest.display()
+            ))
+            .item(
+                ConflictAction::Overwrite,
+                "Overwrite",
+                "replace the existing folder",
             )
-            .prompt()?;
+            .item(
+                ConflictAction::Skip,
+                "Skip",
+                "leave it and don't record this skill",
+            )
+            .item(
+                ConflictAction::Abort,
+                "Abort",
+                "stop now and save what's been installed so far",
+            )
+            .interact()?;
             match action {
-                "Overwrite" => {
+                ConflictAction::Overwrite => {
                     fs::remove_dir_all(&dest)
                         .with_context(|| format!("removing {}", dest.display()))?;
                 }
-                "Skip" => {
-                    println!("skipped: {}", skill.name);
+                ConflictAction::Skip => {
+                    log::info(format!("skipped {}", skill.name))?;
+                    skipped_count += 1;
                     continue;
                 }
-                "Abort" => {
+                ConflictAction::Abort => {
                     project_config::save(&cwd, &project_cfg)?;
-                    println!("aborted.");
+                    outro_cancel("aborted")?;
                     return Ok(());
                 }
-                _ => unreachable!(),
             }
         }
 
@@ -114,89 +145,81 @@ pub fn run(_args: AddArgs) -> Result<()> {
             destination: relative_to_or_self(&dest, &cwd),
             installed_at: installed_at.clone(),
         });
-        println!("installed: {} → {}", skill.name, dest.display());
+        log::success(format!("{} → {}", skill.name, dest.display()))?;
+        installed_count += 1;
     }
 
     project_config::save(&cwd, &project_cfg)?;
+
+    let summary = match (installed_count, skipped_count) {
+        (n, 0) => format!("{n} skill(s) installed"),
+        (n, s) => format!("{n} installed, {s} skipped"),
+    };
+    outro(summary)?;
     Ok(())
 }
 
-struct SkillChoice {
-    skill: Skill,
-}
-
-impl From<Skill> for SkillChoice {
-    fn from(skill: Skill) -> Self {
-        Self { skill }
-    }
-}
-
-impl fmt::Display for SkillChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.skill.description {
-            Some(desc) => write!(f, "{} — {desc}", self.skill.name),
-            None => write!(f, "{}", self.skill.name),
-        }
-    }
-}
-
-enum DestChoice {
-    Existing(PathBuf),
-    Preset {
-        label: &'static str,
-        path: PathBuf,
-    },
-    Custom,
-}
-
-impl fmt::Display for DestChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DestChoice::Existing(p) => write!(f, "{}", p.display()),
-            DestChoice::Preset { label, path } => write!(f, "{label} → {}", path.display()),
-            DestChoice::Custom => f.write_str("Custom path…"),
-        }
-    }
-}
-
 fn pick_destination(existing: Vec<PathBuf>) -> Result<PathBuf> {
-    let choices: Vec<DestChoice> = if existing.is_empty() {
-        vec![
-            DestChoice::Preset {
-                label: "claude",
-                path: PathBuf::from(".claude/skills"),
-            },
-            DestChoice::Preset {
-                label: "codex",
-                path: PathBuf::from(".codex/skills"),
-            },
-            DestChoice::Preset {
-                label: "cursor",
-                path: PathBuf::from(".cursor/skills"),
-            },
-            DestChoice::Preset {
-                label: "agents",
-                path: PathBuf::from(".agents/skills"),
-            },
-            DestChoice::Custom,
-        ]
-    } else {
-        let mut c: Vec<DestChoice> = existing.into_iter().map(DestChoice::Existing).collect();
-        c.push(DestChoice::Custom);
-        c
-    };
+    let mut prompt = select("Install destination");
 
-    let answer = Select::new("Install destination:", choices).prompt()?;
+    if existing.is_empty() {
+        prompt = prompt
+            .item(
+                DestChoice::Preset {
+                    label: "claude",
+                    path: PathBuf::from(".claude/skills"),
+                },
+                "claude",
+                ".claude/skills",
+            )
+            .item(
+                DestChoice::Preset {
+                    label: "codex",
+                    path: PathBuf::from(".codex/skills"),
+                },
+                "codex",
+                ".codex/skills",
+            )
+            .item(
+                DestChoice::Preset {
+                    label: "cursor",
+                    path: PathBuf::from(".cursor/skills"),
+                },
+                "cursor",
+                ".cursor/skills",
+            )
+            .item(
+                DestChoice::Preset {
+                    label: "agents",
+                    path: PathBuf::from(".agents/skills"),
+                },
+                "agents",
+                ".agents/skills",
+            );
+    } else {
+        for p in existing {
+            let display = p.display().to_string();
+            prompt = prompt.item(DestChoice::Existing(p), display, "");
+        }
+    }
+    prompt = prompt.item(DestChoice::Custom, "Custom path…", "type your own");
+
+    let answer = prompt.interact()?;
     match answer {
         DestChoice::Existing(p) => Ok(p),
         DestChoice::Preset { path, .. } => Ok(path),
         DestChoice::Custom => {
-            let typed = Text::new("Path:").prompt()?;
-            let trimmed = typed.trim();
-            if trimmed.is_empty() {
-                return Err(anyhow!("destination path cannot be empty"));
-            }
-            Ok(PathBuf::from(trimmed))
+            let typed: String = input("Path")
+                .placeholder(".claude/skills")
+                .validate(|s: &String| {
+                    if s.trim().is_empty() {
+                        Err("path cannot be empty")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact()?;
+            Ok(PathBuf::from(typed.trim()))
         }
     }
 }
@@ -245,4 +268,53 @@ fn relative_to_or_self(path: &Path, base: &Path) -> PathBuf {
 
 fn strip_dot_prefix(p: PathBuf) -> PathBuf {
     p.strip_prefix(".").map(Path::to_path_buf).unwrap_or(p)
+}
+
+/// Compact a possibly-long description into a single hint line:
+/// strip newlines/runs of whitespace, cut at the first sentence end (`. `)
+/// when reasonable, otherwise cap at ~100 chars with an ellipsis.
+fn short_hint(desc: &str) -> String {
+    let normalized = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+    const CAP: usize = 100;
+    if let Some(period) = normalized.find('.')
+        && period <= CAP
+    {
+        return normalized[..=period].to_string();
+    }
+    if normalized.chars().count() <= CAP {
+        return normalized;
+    }
+    let truncated: String = normalized.chars().take(CAP).collect();
+    format!("{truncated}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_hint;
+
+    #[test]
+    fn short_hint_keeps_short_descriptions() {
+        assert_eq!(short_hint("simple"), "simple");
+    }
+
+    #[test]
+    fn short_hint_cuts_at_first_sentence() {
+        assert_eq!(
+            short_hint("First sentence. Second sentence."),
+            "First sentence."
+        );
+    }
+
+    #[test]
+    fn short_hint_truncates_when_no_period() {
+        let desc = "a".repeat(200);
+        let out = short_hint(&desc);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 101);
+    }
+
+    #[test]
+    fn short_hint_normalizes_whitespace() {
+        assert_eq!(short_hint("  multi\n line   spaces"), "multi line spaces");
+    }
 }
