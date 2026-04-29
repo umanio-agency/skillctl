@@ -1,0 +1,16 @@
+[package]
+name = "skills-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool to manage your personal Claude skills library across projects"
+license = "MIT"
+repository = "https://github.com/umanio-agency/skills-cli"
+readme = "README.md"
+keywords = ["claude", "skills", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "skills"
+path = "src/main.rs"
+
+[dependencies]
