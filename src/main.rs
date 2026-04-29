@@ -1,5 +1,8 @@
 mod cli;
 mod commands;
+mod config;
+mod git;
+mod skill;
 
 use anyhow::Result;
 use clap::Parser;

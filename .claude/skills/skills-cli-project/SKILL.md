@@ -110,8 +110,8 @@ Each selected skill is copied into `<destination>/<skill-name>/` (preserving the
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 - `[x]` **Phase 0 — Bootstrap.** Repo created (private), Rust binary crate scaffolded, README/LICENSE/`.gitignore`, `.claude/CLAUDE.md`, this reference skill.
-- `[~]` **Phase 1 — Foundations.** Crates picked (see §3.1). `clap` skeleton wired with five subcommand stubs (`init`, `list`, `add`, `push`, `detect`) — each returns `Ok` after a placeholder `println!`. Module layout: `src/main.rs` → `src/cli.rs` (clap defs) + `src/commands/{init,list,add,push,detect}.rs`. `cargo build` and `cargo clippy --all-targets -- -D warnings` are clean. Error type formalisation deferred — `anyhow` is enough until a real need surfaces.
-- `[ ]` **Phase 2 — Library link + listing.** `skills init`, `skills list`. Cache + clone/fetch logic. `SKILL.md` discovery via `walkdir`.
+- `[x]` **Phase 1 — Foundations.** Crates picked (see §3.1). `clap` skeleton wired with five subcommand stubs. Module layout: `src/main.rs` → `src/cli.rs` (clap defs) + `src/commands/{init,list,add,push,detect}.rs`. `cargo build` and `cargo clippy --all-targets -- -D warnings` clean.
+- `[x]` **Phase 2 — Library link + listing.** `skills init <github-url>` clones the library into a platform-appropriate cache and persists the URL in `config.toml`. `skills list` reads config, best-effort `git fetch && reset --hard @{upstream}` to refresh, walks the cache via `ignore::WalkBuilder` (hidden dirs included so `.claude/skills/` is found), and prints each `SKILL.md`'s `name` + `description` (frontmatter parsed by a tolerant hand-rolled parser — no YAML crate added). Modules introduced: `src/config.rs`, `src/git.rs`, `src/skill.rs`. Eight unit tests covering URL slugging and frontmatter parsing. End-to-end smoke test against `umanio-agency/skills-cli` itself succeeds.
 - `[ ]` **Phase 3 — Install.** `skills add` with interactive multi-select. Copy skill folder, write `.skills.toml` with source commit SHA.
 - `[ ]` **Phase 4 — Push back.** `skills push` — diff installed skill vs library, commit + push. Detect divergence (when both sides changed) and surface conflict resolution.
 - `[ ]` **Phase 5 — Fork + detect.** `skills push --as-new` (or interactive prompt) for forking. `skills detect` for new local skills.
@@ -119,7 +119,6 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## 7. Open questions / decisions still needed
 
-- **Cache location:** `~/.cache/skills-cli/` (resolved via `directories`) vs `~/.claude/skills-cli/cache/`. Leaning XDG `.cache`. Confirm before Phase 2.
 - **`.skills.toml` schema:** what to record per installed skill — source commit SHA, install timestamp, source path within the library, **destination path within the project** (so subsequent `add` runs can default to the same root)?
 - **Auth for private library repos:** assume the user has `gh` or SSH keys set up, or do we wrap something? Initial answer: assume the host's git credentials work (don't reinvent auth).
 - **Should the install destination be remembered?** After the first `skills add`, do later runs default to the same destination silently, or always re-prompt? Likely: remember and re-prompt only if `--reselect` is passed.
@@ -137,6 +136,10 @@ Append-only. Date each entry. When a decision is later reversed, add a new entry
 - **2026-04-29** — **Install destination is interactive, never hardcoded.** On `skills add`, recursively scan cwd for folders named `skills` (any depth, respecting common ignore rules) and let the user pick. If none are found, offer four presets — `.claude/skills`, `.codex/skills`, `.cursor/skills`, `.agents/skills` — plus a custom-path option. The custom-path option is also offered when matches *are* found, so the user can override.
 - **2026-04-29** — **Phase 1 dependency stack confirmed:** `clap` (derive), `inquire`, `serde` + `toml`, `ignore`, `directories`, `anyhow`. Git operations go through a thin internal `git` module that **shells out to `git`** (rationale: reuses the user's existing auth — gh credential helper, SSH agent — without reimplementing it). Sync only, no async runtime. No logging or colour crate yet.
 - **2026-04-29** — **Module layout:** `src/main.rs` (entry + dispatch), `src/cli.rs` (clap definitions), `src/commands/{init,list,add,push,detect}.rs` (one file per subcommand, each exposing `pub fn run(args) -> Result<()>`). Domain modules (`config`, `git`, `skill`) will be added in the phase that needs them — not pre-created.
+- **2026-04-29** — **Storage paths use `directories::ProjectDirs::from("dev", "umanio-agency", "skills-cli")`** — i.e. platform conventions, not forced XDG. On macOS: config under `~/Library/Application Support/dev.umanio-agency.skills-cli/` and cache under `~/Library/Caches/dev.umanio-agency.skills-cli/`. On Linux: `~/.config/skills-cli/` and `~/.cache/skills-cli/`. Each library repo is cached in a subfolder named `<owner>-<repo>`.
+- **2026-04-29** — **GitHub-only library URLs in v1.** Accept `https://github.com/owner/repo[.git]` and `git@github.com:owner/repo.git`; reject anything else with a clear error. Other hosts (GitLab, self-hosted) can come post-v1.
+- **2026-04-29** — **Frontmatter parser is hand-rolled and tolerant.** It only extracts `name:` and `description:` from a leading `---`-delimited block, supports single-line values with optional quotes, and ignores anything else. No YAML crate added. Multi-line values are not yet supported — revisit if real-world skills need it.
+- **2026-04-29** — **Cache refresh on `list` is best-effort.** `git fetch --quiet --prune && git reset --quiet --hard @{upstream}` runs before discovery; if it fails (e.g. offline), `list` prints a warning to stderr and falls back to the cached snapshot.
 
 ## 9. How to use this skill
 
