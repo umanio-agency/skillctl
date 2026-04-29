@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod fs_util;
 mod git;
 mod project_config;
 mod skill;

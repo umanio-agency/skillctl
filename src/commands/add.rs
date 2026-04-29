@@ -9,6 +9,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::cli::AddArgs;
 use crate::config;
+use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
@@ -126,7 +127,7 @@ pub fn run(_args: AddArgs) -> Result<()> {
             }
         }
 
-        copy_dir_all(&skill.path, &dest)?;
+        fs_util::copy_dir_all(&skill.path, &dest)?;
         let source_path = skill
             .path
             .strip_prefix(&library_root)
@@ -242,22 +243,6 @@ fn find_existing_skills_folders(root: &Path) -> Result<Vec<PathBuf>> {
     }
     found.sort();
     Ok(found)
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
-    for entry in fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)
-                .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn relative_to_or_self(path: &Path, base: &Path) -> PathBuf {
