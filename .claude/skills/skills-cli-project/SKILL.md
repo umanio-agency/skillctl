@@ -117,7 +117,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - `[ ]` **Phase 5 — Fork + detect.** `skills push --as-new` (or interactive prompt) for forking. `skills detect` for new local skills.
 - `[ ]` **Phase 6 — Polish & open source.** Help text, error messages, README usage section, CI (lint + test), publish public, optional crates.io release.
 
-> **Backlog (post-v1, see §10):** skill tags, progressive-filter multi-select prompt.
+> **Backlog (post-v1, see §10):** skill tags, progressive-filter multi-select prompt, non-interactive agent mode.
 
 ## 7. Open questions / decisions still needed
 
@@ -192,3 +192,20 @@ Ideas the user wants to explore but that aren't on a phase yet. Each entry lists
   - `inquire`'s multi-select had a `fuzzy` feature (we left it behind in the cliclack swap), but Enter still meant "confirm everything" — the *additive* Enter semantics is non-standard and AFAIK no off-the-shelf prompt provides it.
   - Likely paths when we get there: (a) build a custom prompt with `ratatui` + `crossterm` (full control, larger investment), (b) revisit `inquire`/`dialoguer` for filter + custom key bindings, (c) layer a small TUI on top of cliclack just for this prompt while keeping the rest of the cliclack flow.
   - **Cross-cutting with §10.1:** filter input should match on name *and* tags, so the two features land naturally in one prompt.
+
+### 10.3 Non-interactive agent mode
+
+- **Raised:** 2026-04-30.
+- **Idea:** Every interactive command (`init`, `add`, `push`, future `detect`) gets a non-interactive twin that accepts every decision the interactive flow would prompt for as flags/args. No TUI, no TTY required. The goal is that an LLM agent (Claude Code or any other) can drive `skills` end-to-end without a human in the loop.
+- **Value:** Unlocks a companion "skills-cli usage" skill that any agent can load to discover and use this CLI as a tool — install/update/push skills as part of larger automations, batch operations across many projects, CI scripting. Agents can't handle a cliclack/inquire TUI (no real TTY), so the current interactive-only shape blocks that whole class of caller.
+- **Open design questions:**
+  - **Activation:** explicit `--non-interactive` global flag, or auto-detect when stdout/stderr aren't a TTY (`isatty`)? Likely: auto-detect by default + a `--no-interaction` override, with the strict rule *"if a required decision isn't supplied via flags, fail fast with a clear error — never silently fall back to a prompt"*.
+  - **Per-command flag surface (sketch):**
+    - `init <url>` already non-interactive; just confirm.
+    - `add`: `--skill <name>` (repeatable) or `--all`; `--dest <path>` (required when not auto-detectable); `--on-conflict overwrite|skip|abort`.
+    - `push`: `--skill <name>` (repeatable) or `--all`; `--on-divergence overwrite|skip|fork`; optional `--message <msg>` to override the auto commit message.
+    - `detect` (Phase 5): `--skill <path>` (repeatable) or `--all`; `--target <library-path>`.
+  - **Structured output:** a `--json` mode (per-command or global) that emits machine-readable status/results, alongside the human-readable default. Important for agents that want to react to outcomes (which skills installed, which were skipped, new HEAD sha, etc.).
+  - **Exit codes:** stable and documented (e.g. `0` success, `2` nothing to do, `3` unresolved conflict, `4` config missing) so agents can branch on result without parsing text.
+  - **Companion artifact:** a Claude-skill named e.g. `skills-cli-usage` shipped *with this repo* that documents the non-interactive surface and gives agents recipes ("to install the foo skill into a project, run …"). Probably lives at `.claude/skills/skills-cli-usage/SKILL.md` and is itself a usage example of the tool eating its own dog food.
+- **Design implication for v1:** every interactive prompt we add from now on should be *designed* with a flag-based equivalent in mind, even if we ship the interactive version first. Cheap to design in up front; expensive to retrofit later.
