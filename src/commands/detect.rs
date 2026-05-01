@@ -1,8 +1,192 @@
-use anyhow::Result;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow};
+use cliclack::{input, intro, log, multiselect, outro, select};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::cli::DetectArgs;
+use crate::commands::shared::short_hint;
+use crate::config;
+use crate::fs_util;
+use crate::git;
+use crate::project_config::{self, InstalledSkill};
+use crate::skill::{self, Skill};
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum LibDestChoice {
+    Existing(PathBuf),
+    Custom,
+}
 
 pub fn run(_args: DetectArgs) -> Result<()> {
-    println!("detect: not implemented yet");
+    intro("skills detect")?;
+
+    let cfg = config::load()?;
+    let library = cfg
+        .library
+        .ok_or_else(|| anyhow!("no library configured — run `skills init <github-url>` first"))?;
+
+    let library_root = config::library_cache_path(&library.url)?;
+    if !library_root.exists() {
+        return Err(anyhow!(
+            "library cache not found at {} — run `skills init {}` again",
+            library_root.display(),
+            library.url
+        ));
+    }
+
+    if let Err(e) = git::fetch_and_fast_forward(&library_root) {
+        log::warning(format!(
+            "could not refresh library cache ({e}); continuing with the cached version"
+        ))?;
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let mut project_cfg = project_config::load(&cwd)?;
+
+    let installed_canonical: HashSet<PathBuf> = project_cfg
+        .installed
+        .iter()
+        .filter_map(|i| std::fs::canonicalize(cwd.join(&i.destination)).ok())
+        .collect();
+
+    let local_skills = skill::discover(&cwd)?;
+    let new_skills: Vec<Skill> = local_skills
+        .into_iter()
+        .filter(|s| match std::fs::canonicalize(&s.path) {
+            Ok(c) => !installed_canonical.contains(&c),
+            Err(_) => true,
+        })
+        .collect();
+
+    if new_skills.is_empty() {
+        outro("no new skills detected (everything is tracked in .skills.toml)")?;
+        return Ok(());
+    }
+
+    let mut prompt = multiselect("New skills to add to the library").required(true);
+    for s in &new_skills {
+        let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+        prompt = prompt.item(s.clone(), &s.name, hint);
+    }
+    let selected: Vec<Skill> = prompt.interact()?;
+
+    let lib_dest_relative = pick_library_destination(&library_root)?;
+
+    let mut applies: Vec<(Skill, PathBuf, PathBuf)> = Vec::new();
+    for skill in selected {
+        let folder_name = skill.path.file_name().ok_or_else(|| {
+            anyhow!("skill folder has no name: {}", skill.path.display())
+        })?;
+        let lib_relative = lib_dest_relative.join(folder_name);
+        let lib_absolute = library_root.join(&lib_relative);
+
+        if lib_absolute.exists() {
+            log::warning(format!(
+                "{} → {} already exists in the library; skipping",
+                skill.name,
+                lib_relative.display()
+            ))?;
+            continue;
+        }
+
+        applies.push((skill, lib_relative, lib_absolute));
+    }
+
+    if applies.is_empty() {
+        outro("nothing to add")?;
+        return Ok(());
+    }
+
+    for (skill, _lib_relative, lib_absolute) in &applies {
+        fs_util::copy_dir_all(&skill.path, lib_absolute)?;
+    }
+    for (_, lib_relative, _) in &applies {
+        git::add_all(&library_root, lib_relative)?;
+    }
+
+    if !git::has_staged_changes(&library_root)? {
+        outro("no effective changes after adding")?;
+        return Ok(());
+    }
+
+    let names: Vec<&str> = applies.iter().map(|(s, _, _)| s.name.as_str()).collect();
+    let message = if names.len() == 1 {
+        format!("add skill: {}", names[0])
+    } else {
+        format!("add skills: {}", names.join(", "))
+    };
+    let new_sha = git::commit(&library_root, &message)?;
+    git::push(&library_root)?;
+
+    let installed_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("formatting installation timestamp")?;
+
+    for (skill, lib_relative, _) in &applies {
+        let local_destination = fs_util::relative_to_or_self(&skill.path, &cwd);
+        project_cfg.installed.push(InstalledSkill {
+            name: skill.name.clone(),
+            source_path: lib_relative.clone(),
+            source_sha: new_sha.clone(),
+            destination: local_destination,
+            installed_at: installed_at.clone(),
+        });
+        log::success(format!("{} → {}", skill.name, lib_relative.display()))?;
+    }
+    project_config::save(&cwd, &project_cfg)?;
+
+    outro(format!("added {} skill(s) to the library", applies.len()))?;
     Ok(())
+}
+
+fn pick_library_destination(library_root: &Path) -> Result<PathBuf> {
+    let folders = skill::find_skills_folders(library_root)?;
+
+    let mut prompt = select("Library destination");
+
+    if folders.is_empty() {
+        prompt = prompt.item(
+            LibDestChoice::Existing(PathBuf::from("skills")),
+            "skills",
+            "create a top-level `skills/` folder in the library",
+        );
+    } else {
+        for folder in folders {
+            let rel = folder
+                .strip_prefix(library_root)
+                .map(Path::to_path_buf)
+                .unwrap_or(folder);
+            let display = rel.display().to_string();
+            prompt = prompt.item(LibDestChoice::Existing(rel), display, "");
+        }
+    }
+    prompt = prompt.item(
+        LibDestChoice::Custom,
+        "Custom path…",
+        "type a path relative to the library root",
+    );
+
+    let answer = prompt.interact()?;
+    match answer {
+        LibDestChoice::Existing(p) => Ok(p),
+        LibDestChoice::Custom => {
+            let typed: String = input("Path inside library")
+                .placeholder("skills")
+                .validate(|s: &String| {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        return Err("path cannot be empty");
+                    }
+                    if Path::new(trimmed).is_absolute() {
+                        return Err("use a path relative to the library root");
+                    }
+                    Ok(())
+                })
+                .interact()?;
+            Ok(PathBuf::from(typed.trim()))
+        }
+    }
 }

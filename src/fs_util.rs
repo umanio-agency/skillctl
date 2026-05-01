@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -26,4 +26,16 @@ pub fn replace_folder_contents(src: &Path, dst: &Path) -> Result<()> {
         fs::remove_dir_all(dst).with_context(|| format!("removing {}", dst.display()))?;
     }
     copy_dir_all(src, dst)
+}
+
+/// Express `path` relative to `base` when possible; otherwise strip a leading
+/// `./` for a cleaner display.
+pub fn relative_to_or_self(path: &Path, base: &Path) -> PathBuf {
+    path.strip_prefix(base)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| strip_dot_prefix(path.to_path_buf()))
+}
+
+pub fn strip_dot_prefix(p: PathBuf) -> PathBuf {
+    p.strip_prefix(".").map(Path::to_path_buf).unwrap_or(p)
 }

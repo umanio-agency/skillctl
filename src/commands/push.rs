@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use cliclack::{intro, log, multiselect, outro, select};
+use cliclack::{input, intro, log, multiselect, outro, select};
 use ignore::WalkBuilder;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::cli::PushArgs;
 use crate::config;
@@ -23,6 +26,7 @@ enum SkillStatus {
     LibraryMissing,
 }
 
+#[derive(Clone, Debug)]
 struct Candidate {
     index: usize,
     name: String,
@@ -31,9 +35,30 @@ struct Candidate {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum DivergenceAction {
+enum DivergenceChoice {
     Overwrite,
+    Fork,
     Skip,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum LibMissingChoice {
+    Fork,
+    Skip,
+}
+
+struct Apply {
+    candidate_index: usize,
+    op: ApplyOp,
+}
+
+enum ApplyOp {
+    Update,
+    Fork {
+        new_name: String,
+        new_library_path: PathBuf,
+        new_local_destination: PathBuf,
+    },
 }
 
 pub fn run(_args: PushArgs) -> Result<()> {
@@ -77,16 +102,6 @@ pub fn run(_args: PushArgs) -> Result<()> {
         });
     }
 
-    let pushable: Vec<&Candidate> = candidates
-        .iter()
-        .filter(|c| {
-            matches!(
-                c.status,
-                SkillStatus::LocalChangesOnly | SkillStatus::BothDiverged { .. }
-            )
-        })
-        .collect();
-
     for c in &candidates {
         match &c.status {
             SkillStatus::Unchanged => log::info(format!("{} — no local changes", c.name))?,
@@ -95,13 +110,21 @@ pub fn run(_args: PushArgs) -> Result<()> {
                 c.name,
                 c.destination.display()
             ))?,
-            SkillStatus::LibraryMissing => log::warning(format!(
-                "{} — source path no longer exists in library; fork support arrives in Phase 5",
-                c.name
-            ))?,
             _ => {}
         }
     }
+
+    let pushable: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.status,
+                SkillStatus::LocalChangesOnly
+                    | SkillStatus::BothDiverged { .. }
+                    | SkillStatus::LibraryMissing
+            )
+        })
+        .collect();
 
     if pushable.is_empty() {
         outro("nothing to push")?;
@@ -115,56 +138,107 @@ pub fn run(_args: PushArgs) -> Result<()> {
     }
     let selected_indices: Vec<usize> = prompt.interact()?;
 
-    let mut to_apply: Vec<&Candidate> = Vec::new();
+    let mut applies: Vec<Apply> = Vec::new();
     for idx in &selected_indices {
         let candidate = pushable
             .iter()
             .find(|c| c.index == *idx)
             .copied()
             .ok_or_else(|| anyhow!("selected index {idx} not in pushable set"))?;
+        let installed = &project_cfg.installed[candidate.index];
 
-        if let SkillStatus::BothDiverged {
-            local_changed,
-            library_changed,
-        } = &candidate.status
-        {
-            let action = select(format!(
-                "`{}` diverged ({} file(s) changed locally, {} in library) — what do you want to do?",
-                candidate.name, local_changed, library_changed
-            ))
-            .item(
-                DivergenceAction::Overwrite,
-                "Overwrite library",
-                "force the local version onto the library, discarding library-side changes",
-            )
-            .item(
-                DivergenceAction::Skip,
-                "Skip",
-                "leave this skill untouched on both sides",
-            )
-            .interact()?;
-            match action {
-                DivergenceAction::Overwrite => to_apply.push(candidate),
-                DivergenceAction::Skip => {
-                    log::info(format!("skipped {}", candidate.name))?;
+        let op = match &candidate.status {
+            SkillStatus::LocalChangesOnly => Some(ApplyOp::Update),
+            SkillStatus::BothDiverged {
+                local_changed,
+                library_changed,
+            } => {
+                let choice = select(format!(
+                    "`{}` diverged ({} file(s) changed locally, {} in library) — what do you want to do?",
+                    candidate.name, local_changed, library_changed
+                ))
+                .item(
+                    DivergenceChoice::Overwrite,
+                    "Overwrite library",
+                    "force the local version onto the library, discarding library-side changes",
+                )
+                .item(
+                    DivergenceChoice::Fork,
+                    "Fork as new skill",
+                    "create a new skill in the library from the local content; the original stays untouched",
+                )
+                .item(
+                    DivergenceChoice::Skip,
+                    "Skip",
+                    "leave this skill untouched on both sides",
+                )
+                .interact()?;
+                match choice {
+                    DivergenceChoice::Overwrite => Some(ApplyOp::Update),
+                    DivergenceChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
+                    DivergenceChoice::Skip => {
+                        log::info(format!("skipped {}", candidate.name))?;
+                        None
+                    }
                 }
             }
-        } else {
-            to_apply.push(candidate);
+            SkillStatus::LibraryMissing => {
+                let choice = select(format!(
+                    "`{}` no longer exists in the library — what do you want to do?",
+                    candidate.name
+                ))
+                .item(
+                    LibMissingChoice::Fork,
+                    "Fork as new skill",
+                    "push the local content back as a new skill",
+                )
+                .item(
+                    LibMissingChoice::Skip,
+                    "Skip",
+                    "leave this skill untracked",
+                )
+                .interact()?;
+                match choice {
+                    LibMissingChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
+                    LibMissingChoice::Skip => {
+                        log::info(format!("skipped {}", candidate.name))?;
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(op) = op {
+            applies.push(Apply {
+                candidate_index: candidate.index,
+                op,
+            });
         }
     }
 
-    if to_apply.is_empty() {
+    if applies.is_empty() {
         outro("nothing to push after conflict resolution")?;
         return Ok(());
     }
 
-    for candidate in &to_apply {
-        let installed = &project_cfg.installed[candidate.index];
+    for apply in &applies {
+        let installed = &project_cfg.installed[apply.candidate_index];
         let local_dir = cwd.join(&installed.destination);
-        let library_dir = library_root.join(&installed.source_path);
+        let (library_dir, library_relative) = match &apply.op {
+            ApplyOp::Update => (
+                library_root.join(&installed.source_path),
+                installed.source_path.clone(),
+            ),
+            ApplyOp::Fork {
+                new_library_path, ..
+            } => (
+                library_root.join(new_library_path),
+                new_library_path.clone(),
+            ),
+        };
         fs_util::replace_folder_contents(&local_dir, &library_dir)?;
-        git::add_all(&library_root, &installed.source_path)?;
+        git::add_all(&library_root, &library_relative)?;
     }
 
     if !git::has_staged_changes(&library_root)? {
@@ -172,31 +246,177 @@ pub fn run(_args: PushArgs) -> Result<()> {
         return Ok(());
     }
 
-    let names: Vec<&str> = to_apply.iter().map(|c| c.name.as_str()).collect();
-    let message = if names.len() == 1 {
-        format!("update skill: {}", names[0])
-    } else {
-        format!("update skills: {}", names.join(", "))
-    };
+    let updates: Vec<&str> = applies
+        .iter()
+        .filter(|a| matches!(a.op, ApplyOp::Update))
+        .map(|a| project_cfg.installed[a.candidate_index].name.as_str())
+        .collect();
+    let adds: Vec<&str> = applies
+        .iter()
+        .filter_map(|a| match &a.op {
+            ApplyOp::Fork { new_name, .. } => Some(new_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let message = build_commit_message(&updates, &adds);
 
     let new_sha = git::commit(&library_root, &message)?;
     git::push(&library_root)?;
 
-    for candidate in &to_apply {
-        project_cfg.installed[candidate.index].source_sha = new_sha.clone();
-        log::success(format!("{} → {}", candidate.name, &new_sha[..7.min(new_sha.len())]))?;
+    let installed_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("formatting installation timestamp")?;
+
+    let mut updated_count = 0usize;
+    let mut forked_count = 0usize;
+
+    for apply in &applies {
+        match &apply.op {
+            ApplyOp::Update => {
+                let entry = &mut project_cfg.installed[apply.candidate_index];
+                entry.source_sha = new_sha.clone();
+                log::success(format!(
+                    "{} → {}",
+                    entry.name,
+                    short_sha(&new_sha)
+                ))?;
+                updated_count += 1;
+            }
+            ApplyOp::Fork {
+                new_name,
+                new_library_path,
+                new_local_destination,
+            } => {
+                let abs_old = cwd.join(&project_cfg.installed[apply.candidate_index].destination);
+                let abs_new = cwd.join(new_local_destination);
+                if abs_old != abs_new {
+                    if let Some(parent) = abs_new.parent() {
+                        fs::create_dir_all(parent).with_context(|| {
+                            format!("creating parent of {}", abs_new.display())
+                        })?;
+                    }
+                    fs::rename(&abs_old, &abs_new).with_context(|| {
+                        format!("renaming {} -> {}", abs_old.display(), abs_new.display())
+                    })?;
+                }
+                project_cfg.installed[apply.candidate_index] = InstalledSkill {
+                    name: new_name.clone(),
+                    source_path: new_library_path.clone(),
+                    source_sha: new_sha.clone(),
+                    destination: new_local_destination.clone(),
+                    installed_at: installed_at.clone(),
+                };
+                log::success(format!(
+                    "forked → {} ({})",
+                    new_name,
+                    short_sha(&new_sha)
+                ))?;
+                forked_count += 1;
+            }
+        }
     }
     project_config::save(&cwd, &project_cfg)?;
 
-    let summary = match (to_apply.len(), selected_indices.len() - to_apply.len()) {
-        (n, 0) => format!("pushed {n} skill(s)"),
-        (n, s) => format!("pushed {n}, skipped {s}"),
+    let total = updated_count + forked_count;
+    let skipped = selected_indices.len() - total;
+    let summary = match (updated_count, forked_count, skipped) {
+        (u, 0, 0) => format!("pushed {u} skill(s)"),
+        (0, f, 0) => format!("forked {f} skill(s)"),
+        (u, f, 0) => format!("pushed {u}, forked {f}"),
+        (u, 0, s) => format!("pushed {u}, skipped {s}"),
+        (0, f, s) => format!("forked {f}, skipped {s}"),
+        (u, f, s) => format!("pushed {u}, forked {f}, skipped {s}"),
     };
     outro(summary)?;
     Ok(())
 }
 
-fn classify(installed: &InstalledSkill, project_root: &Path, library_root: &Path) -> Result<SkillStatus> {
+fn prompt_fork_op(installed: &InstalledSkill, library_root: &Path) -> Result<ApplyOp> {
+    let raw_name: String = input("New skill name")
+        .placeholder("foo-custom")
+        .validate(|s: &String| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Err("name cannot be empty");
+            }
+            if trimmed.contains('/') || trimmed.contains('\\') {
+                return Err("name cannot contain `/` or `\\`");
+            }
+            Ok(())
+        })
+        .interact()?;
+    let new_name = raw_name.trim().to_string();
+
+    let library_parent = installed
+        .source_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(""));
+    let new_library_path = if library_parent.as_os_str().is_empty() {
+        PathBuf::from(&new_name)
+    } else {
+        library_parent.join(&new_name)
+    };
+
+    if library_root.join(&new_library_path).exists() {
+        return Err(anyhow!(
+            "a folder already exists at {} in the library — pick a different name",
+            new_library_path.display()
+        ));
+    }
+
+    let local_parent = installed
+        .destination
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(""));
+    let new_local_destination = if local_parent.as_os_str().is_empty() {
+        PathBuf::from(&new_name)
+    } else {
+        local_parent.join(&new_name)
+    };
+
+    Ok(ApplyOp::Fork {
+        new_name,
+        new_library_path,
+        new_local_destination,
+    })
+}
+
+fn build_commit_message(updates: &[&str], adds: &[&str]) -> String {
+    match (updates.is_empty(), adds.is_empty()) {
+        (false, true) => {
+            if updates.len() == 1 {
+                format!("update skill: {}", updates[0])
+            } else {
+                format!("update skills: {}", updates.join(", "))
+            }
+        }
+        (true, false) => {
+            if adds.len() == 1 {
+                format!("add skill: {}", adds[0])
+            } else {
+                format!("add skills: {}", adds.join(", "))
+            }
+        }
+        (false, false) => format!(
+            "sync skills\n\nUpdate: {}\nAdd: {}",
+            updates.join(", "),
+            adds.join(", ")
+        ),
+        _ => "sync skills".to_string(),
+    }
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..7.min(sha.len())]
+}
+
+fn classify(
+    installed: &InstalledSkill,
+    project_root: &Path,
+    library_root: &Path,
+) -> Result<SkillStatus> {
     let local_dir = project_root.join(&installed.destination);
     if !local_dir.exists() {
         return Ok(SkillStatus::LocalMissing);
@@ -320,7 +540,40 @@ mod tests {
     fn count_diff_combined() {
         let a = map(&[("a", "1"), ("b", "2"), ("c", "3")]);
         let b = map(&[("a", "1"), ("b", "9"), ("d", "4")]);
-        // changed: b. added in a: c. removed from a: d. = 3
         assert_eq!(count_diff(&a, &b), 3);
+    }
+
+    #[test]
+    fn commit_message_single_update() {
+        assert_eq!(build_commit_message(&["foo"], &[]), "update skill: foo");
+    }
+
+    #[test]
+    fn commit_message_multi_update() {
+        assert_eq!(
+            build_commit_message(&["foo", "bar"], &[]),
+            "update skills: foo, bar"
+        );
+    }
+
+    #[test]
+    fn commit_message_single_add() {
+        assert_eq!(build_commit_message(&[], &["fork"]), "add skill: fork");
+    }
+
+    #[test]
+    fn commit_message_multi_add() {
+        assert_eq!(
+            build_commit_message(&[], &["a", "b"]),
+            "add skills: a, b"
+        );
+    }
+
+    #[test]
+    fn commit_message_mixed_uses_body() {
+        let msg = build_commit_message(&["foo"], &["bar"]);
+        assert!(msg.starts_with("sync skills\n"));
+        assert!(msg.contains("Update: foo"));
+        assert!(msg.contains("Add: bar"));
     }
 }
