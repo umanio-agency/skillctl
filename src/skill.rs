@@ -11,7 +11,13 @@ pub struct Skill {
 }
 
 pub fn discover(root: &Path) -> Result<Vec<Skill>> {
-    let walker = WalkBuilder::new(root).hidden(false).build();
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(|e| {
+            let name = e.file_name();
+            name != "node_modules" && name != "target"
+        })
+        .build();
     let mut skills = Vec::new();
     for entry in walker {
         let entry = entry.context("walking the library tree")?;
@@ -42,6 +48,31 @@ pub fn discover(root: &Path) -> Result<Vec<Skill>> {
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(skills)
+}
+
+/// Recursively find every directory literally named `skills` under `root`.
+/// Honours `.gitignore`, plus skips `node_modules` and `target` outright.
+/// Hidden directories are walked so that conventions like `.claude/skills/`
+/// are reachable. Returns the paths walker-style (relative to `root` if
+/// `root` is `.`, absolute otherwise) — callers normalise as needed.
+pub fn find_skills_folders(root: &Path) -> Result<Vec<PathBuf>> {
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .filter_entry(|e| {
+            let name = e.file_name();
+            name != "node_modules" && name != "target"
+        })
+        .build();
+    let mut found = Vec::new();
+    for entry in walker {
+        let entry = entry.context("walking the directory tree")?;
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        if is_dir && entry.file_name() == "skills" {
+            found.push(entry.path().to_path_buf());
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// Extract `name` and `description` from a leading YAML-style frontmatter block.

@@ -1,13 +1,13 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use cliclack::{input, intro, log, multiselect, outro, outro_cancel, select};
-use ignore::WalkBuilder;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::AddArgs;
+use crate::commands::shared::short_hint;
 use crate::config;
 use crate::fs_util;
 use crate::git;
@@ -60,8 +60,7 @@ pub fn run(_args: AddArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut prompt = multiselect("Skills to install")
-        .required(true);
+    let mut prompt = multiselect("Skills to install").required(true);
     for s in &skills {
         let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
         prompt = prompt.item(s.clone(), &s.name, hint);
@@ -69,7 +68,10 @@ pub fn run(_args: AddArgs) -> Result<()> {
     let selected: Vec<Skill> = prompt.interact()?;
 
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let existing = find_existing_skills_folders(&cwd)?;
+    let existing = skill::find_skills_folders(&cwd)?
+        .into_iter()
+        .map(fs_util::strip_dot_prefix)
+        .collect();
     let dest_root = pick_destination(existing)?;
 
     let source_sha = git::head_sha(&library_root)?;
@@ -143,7 +145,7 @@ pub fn run(_args: AddArgs) -> Result<()> {
             name: skill.name.clone(),
             source_path,
             source_sha: source_sha.clone(),
-            destination: relative_to_or_self(&dest, &cwd),
+            destination: fs_util::relative_to_or_self(&dest, &cwd),
             installed_at: installed_at.clone(),
         });
         log::success(format!("{} → {}", skill.name, dest.display()))?;
@@ -222,84 +224,5 @@ fn pick_destination(existing: Vec<PathBuf>) -> Result<PathBuf> {
                 .interact()?;
             Ok(PathBuf::from(typed.trim()))
         }
-    }
-}
-
-fn find_existing_skills_folders(root: &Path) -> Result<Vec<PathBuf>> {
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .filter_entry(|e| {
-            let name = e.file_name();
-            name != "node_modules" && name != "target"
-        })
-        .build();
-    let mut found = Vec::new();
-    for entry in walker {
-        let entry = entry.context("walking the project tree")?;
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-        if is_dir && entry.file_name() == "skills" {
-            found.push(strip_dot_prefix(entry.path().to_path_buf()));
-        }
-    }
-    found.sort();
-    Ok(found)
-}
-
-fn relative_to_or_self(path: &Path, base: &Path) -> PathBuf {
-    path.strip_prefix(base)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|_| strip_dot_prefix(path.to_path_buf()))
-}
-
-fn strip_dot_prefix(p: PathBuf) -> PathBuf {
-    p.strip_prefix(".").map(Path::to_path_buf).unwrap_or(p)
-}
-
-/// Compact a possibly-long description into a single hint line:
-/// strip newlines/runs of whitespace, cut at the first sentence end (`. `)
-/// when reasonable, otherwise cap at ~100 chars with an ellipsis.
-fn short_hint(desc: &str) -> String {
-    let normalized = desc.split_whitespace().collect::<Vec<_>>().join(" ");
-    const CAP: usize = 100;
-    if let Some(period) = normalized.find('.')
-        && period <= CAP
-    {
-        return normalized[..=period].to_string();
-    }
-    if normalized.chars().count() <= CAP {
-        return normalized;
-    }
-    let truncated: String = normalized.chars().take(CAP).collect();
-    format!("{truncated}…")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::short_hint;
-
-    #[test]
-    fn short_hint_keeps_short_descriptions() {
-        assert_eq!(short_hint("simple"), "simple");
-    }
-
-    #[test]
-    fn short_hint_cuts_at_first_sentence() {
-        assert_eq!(
-            short_hint("First sentence. Second sentence."),
-            "First sentence."
-        );
-    }
-
-    #[test]
-    fn short_hint_truncates_when_no_period() {
-        let desc = "a".repeat(200);
-        let out = short_hint(&desc);
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 101);
-    }
-
-    #[test]
-    fn short_hint_normalizes_whitespace() {
-        assert_eq!(short_hint("  multi\n line   spaces"), "multi line spaces");
     }
 }
