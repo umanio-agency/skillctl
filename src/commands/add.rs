@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use cliclack::{input, intro, log, multiselect, outro, outro_cancel, select};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::cli::AddArgs;
+use crate::cli::{AddArgs, OnConflict};
 use crate::commands::shared::short_hint;
 use crate::config;
+use crate::context::Context;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
@@ -31,7 +32,17 @@ enum ConflictAction {
     Abort,
 }
 
-pub fn run(_args: AddArgs) -> Result<()> {
+impl From<OnConflict> for ConflictAction {
+    fn from(v: OnConflict) -> Self {
+        match v {
+            OnConflict::Overwrite => Self::Overwrite,
+            OnConflict::Skip => Self::Skip,
+            OnConflict::Abort => Self::Abort,
+        }
+    }
+}
+
+pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     intro("skills add")?;
 
     let cfg = config::load()?;
@@ -60,19 +71,16 @@ pub fn run(_args: AddArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut prompt = multiselect("Skills to install").required(true);
-    for s in &skills {
-        let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
-        prompt = prompt.item(s.clone(), &s.name, hint);
+    let selected = select_skills(&args, ctx, &skills)?;
+    if selected.is_empty() {
+        outro("no skills selected")?;
+        return Ok(());
     }
-    let selected: Vec<Skill> = prompt.interact()?;
 
     let cwd = std::env::current_dir().context("reading current directory")?;
-    let existing = skill::find_skills_folders(&cwd)?
-        .into_iter()
-        .map(fs_util::strip_dot_prefix)
-        .collect();
-    let dest_root = pick_destination(existing)?;
+    let dest_root = resolve_destination(&args, ctx, &cwd)?;
+
+    let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
 
     let source_sha = git::head_sha(&library_root)?;
     let installed_at = OffsetDateTime::now_utc()
@@ -91,26 +99,7 @@ pub fn run(_args: AddArgs) -> Result<()> {
         let dest = dest_root.join(folder_name);
 
         if dest.exists() {
-            let action = select(format!(
-                "`{}` already exists — what do you want to do?",
-                dest.display()
-            ))
-            .item(
-                ConflictAction::Overwrite,
-                "Overwrite",
-                "replace the existing folder",
-            )
-            .item(
-                ConflictAction::Skip,
-                "Skip",
-                "leave it and don't record this skill",
-            )
-            .item(
-                ConflictAction::Abort,
-                "Abort",
-                "stop now and save what's been installed so far",
-            )
-            .interact()?;
+            let action = resolve_conflict(ctx, &dest, conflict_policy.clone())?;
             match action {
                 ConflictAction::Overwrite => {
                     fs::remove_dir_all(&dest)
@@ -162,7 +151,87 @@ pub fn run(_args: AddArgs) -> Result<()> {
     Ok(())
 }
 
-fn pick_destination(existing: Vec<PathBuf>) -> Result<PathBuf> {
+fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<Skill>> {
+    if args.all {
+        return Ok(skills.to_vec());
+    }
+    if !args.skills.is_empty() {
+        let mut chosen = Vec::with_capacity(args.skills.len());
+        for name in &args.skills {
+            let skill = skills
+                .iter()
+                .find(|s| s.name == *name)
+                .ok_or_else(|| anyhow!("no skill named `{name}` in the library"))?;
+            chosen.push(skill.clone());
+        }
+        return Ok(chosen);
+    }
+    if !ctx.interactive {
+        return Err(anyhow!(
+            "no skills selected — pass --skill <name> (repeatable) or --all"
+        ));
+    }
+    let mut prompt = multiselect("Skills to install").required(true);
+    for s in skills {
+        let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+        prompt = prompt.item(s.clone(), &s.name, hint);
+    }
+    Ok(prompt.interact()?)
+}
+
+fn resolve_destination(args: &AddArgs, ctx: &Context, cwd: &std::path::Path) -> Result<PathBuf> {
+    if let Some(dest) = &args.dest {
+        return Ok(dest.clone());
+    }
+    if !ctx.interactive {
+        return Err(anyhow!(
+            "no install destination — pass --dest <path>"
+        ));
+    }
+    let existing = skill::find_skills_folders(cwd)?
+        .into_iter()
+        .map(fs_util::strip_dot_prefix)
+        .collect();
+    pick_destination_interactive(existing)
+}
+
+fn resolve_conflict(
+    ctx: &Context,
+    dest: &std::path::Path,
+    policy: Option<ConflictAction>,
+) -> Result<ConflictAction> {
+    if let Some(policy) = policy {
+        return Ok(policy);
+    }
+    if !ctx.interactive {
+        return Err(anyhow!(
+            "destination `{}` already exists — pass --on-conflict overwrite|skip|abort",
+            dest.display()
+        ));
+    }
+    Ok(select(format!(
+        "`{}` already exists — what do you want to do?",
+        dest.display()
+    ))
+    .item(
+        ConflictAction::Overwrite,
+        "Overwrite",
+        "replace the existing folder",
+    )
+    .item(
+        ConflictAction::Skip,
+        "Skip",
+        "leave it and don't record this skill",
+    )
+    .item(
+        ConflictAction::Abort,
+        "Abort",
+        "stop now and save what's been installed so far",
+    )
+    .interact()?)
+}
+
+fn pick_destination_interactive(existing: Vec<PathBuf>) -> Result<PathBuf> {
     let mut prompt = select("Install destination");
 
     if existing.is_empty() {

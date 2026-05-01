@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use cliclack::{input, intro, log, multiselect, outro, select};
 use ignore::WalkBuilder;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::cli::PushArgs;
+use crate::cli::{OnDivergence, PushArgs};
 use crate::config;
+use crate::context::Context;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
@@ -41,6 +42,15 @@ enum DivergenceChoice {
     Skip,
 }
 
+impl From<OnDivergence> for DivergenceChoice {
+    fn from(v: OnDivergence) -> Self {
+        match v {
+            OnDivergence::Overwrite => Self::Overwrite,
+            OnDivergence::Skip => Self::Skip,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum LibMissingChoice {
     Fork,
@@ -61,7 +71,7 @@ enum ApplyOp {
     },
 }
 
-pub fn run(_args: PushArgs) -> Result<()> {
+pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     intro("skills push")?;
 
     let cfg = config::load()?;
@@ -131,12 +141,11 @@ pub fn run(_args: PushArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut prompt = multiselect("Skills to push").required(true);
-    for c in &pushable {
-        let hint = describe(&c.status);
-        prompt = prompt.item(c.index, &c.name, hint);
+    let selected_indices = select_pushable(&args, ctx, &pushable)?;
+    if selected_indices.is_empty() {
+        outro("no skills selected")?;
+        return Ok(());
     }
-    let selected_indices: Vec<usize> = prompt.interact()?;
 
     let mut applies: Vec<Apply> = Vec::new();
     for idx in &selected_indices {
@@ -153,26 +162,36 @@ pub fn run(_args: PushArgs) -> Result<()> {
                 local_changed,
                 library_changed,
             } => {
-                let choice = select(format!(
-                    "`{}` diverged ({} file(s) changed locally, {} in library) — what do you want to do?",
-                    candidate.name, local_changed, library_changed
-                ))
-                .item(
-                    DivergenceChoice::Overwrite,
-                    "Overwrite library",
-                    "force the local version onto the library, discarding library-side changes",
-                )
-                .item(
-                    DivergenceChoice::Fork,
-                    "Fork as new skill",
-                    "create a new skill in the library from the local content; the original stays untouched",
-                )
-                .item(
-                    DivergenceChoice::Skip,
-                    "Skip",
-                    "leave this skill untouched on both sides",
-                )
-                .interact()?;
+                let choice = if let Some(policy) = args.on_divergence {
+                    DivergenceChoice::from(policy)
+                } else if !ctx.interactive {
+                    log::warning(format!(
+                        "{} diverged but no --on-divergence policy provided; skipping",
+                        candidate.name
+                    ))?;
+                    DivergenceChoice::Skip
+                } else {
+                    select(format!(
+                        "`{}` diverged ({} file(s) changed locally, {} in library) — what do you want to do?",
+                        candidate.name, local_changed, library_changed
+                    ))
+                    .item(
+                        DivergenceChoice::Overwrite,
+                        "Overwrite library",
+                        "force the local version onto the library, discarding library-side changes",
+                    )
+                    .item(
+                        DivergenceChoice::Fork,
+                        "Fork as new skill",
+                        "create a new skill in the library from the local content; the original stays untouched",
+                    )
+                    .item(
+                        DivergenceChoice::Skip,
+                        "Skip",
+                        "leave this skill untouched on both sides",
+                    )
+                    .interact()?
+                };
                 match choice {
                     DivergenceChoice::Overwrite => Some(ApplyOp::Update),
                     DivergenceChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
@@ -183,21 +202,43 @@ pub fn run(_args: PushArgs) -> Result<()> {
                 }
             }
             SkillStatus::LibraryMissing => {
-                let choice = select(format!(
-                    "`{}` no longer exists in the library — what do you want to do?",
-                    candidate.name
-                ))
-                .item(
-                    LibMissingChoice::Fork,
-                    "Fork as new skill",
-                    "push the local content back as a new skill",
-                )
-                .item(
-                    LibMissingChoice::Skip,
-                    "Skip",
-                    "leave this skill untracked",
-                )
-                .interact()?;
+                let choice = if let Some(policy) = args.on_divergence {
+                    // For LibraryMissing: only fork makes sense (no library to overwrite).
+                    // Skip policy → Skip; Overwrite policy → also treated as Skip (no source path
+                    // to overwrite at), with a warning.
+                    match policy {
+                        OnDivergence::Skip => LibMissingChoice::Skip,
+                        OnDivergence::Overwrite => {
+                            log::warning(format!(
+                                "{} is removed from the library; --on-divergence overwrite cannot apply (use the interactive flow for fork)",
+                                candidate.name
+                            ))?;
+                            LibMissingChoice::Skip
+                        }
+                    }
+                } else if !ctx.interactive {
+                    log::warning(format!(
+                        "{} is removed from the library and fork is interactive-only; skipping",
+                        candidate.name
+                    ))?;
+                    LibMissingChoice::Skip
+                } else {
+                    select(format!(
+                        "`{}` no longer exists in the library — what do you want to do?",
+                        candidate.name
+                    ))
+                    .item(
+                        LibMissingChoice::Fork,
+                        "Fork as new skill",
+                        "push the local content back as a new skill",
+                    )
+                    .item(
+                        LibMissingChoice::Skip,
+                        "Skip",
+                        "leave this skill untracked",
+                    )
+                    .interact()?
+                };
                 match choice {
                     LibMissingChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
                     LibMissingChoice::Skip => {
@@ -258,7 +299,10 @@ pub fn run(_args: PushArgs) -> Result<()> {
             _ => None,
         })
         .collect();
-    let message = build_commit_message(&updates, &adds);
+    let message = args
+        .message
+        .clone()
+        .unwrap_or_else(|| build_commit_message(&updates, &adds));
 
     let new_sha = git::commit(&library_root, &message)?;
     git::push(&library_root)?;
@@ -329,6 +373,40 @@ pub fn run(_args: PushArgs) -> Result<()> {
     };
     outro(summary)?;
     Ok(())
+}
+
+fn select_pushable(
+    args: &PushArgs,
+    ctx: &Context,
+    pushable: &[&Candidate],
+) -> Result<Vec<usize>> {
+    if args.all {
+        return Ok(pushable.iter().map(|c| c.index).collect());
+    }
+    if !args.skills.is_empty() {
+        let mut chosen = Vec::with_capacity(args.skills.len());
+        for name in &args.skills {
+            let candidate = pushable
+                .iter()
+                .find(|c| c.name == *name)
+                .ok_or_else(|| {
+                    anyhow!("no pushable skill named `{name}` (skill is unchanged, missing locally, or unknown)")
+                })?;
+            chosen.push(candidate.index);
+        }
+        return Ok(chosen);
+    }
+    if !ctx.interactive {
+        return Err(anyhow!(
+            "no skills selected — pass --skill <name> (repeatable) or --all"
+        ));
+    }
+    let mut prompt = multiselect("Skills to push").required(true);
+    for c in pushable {
+        let hint = describe(&c.status);
+        prompt = prompt.item(c.index, &c.name, hint);
+    }
+    Ok(prompt.interact()?)
 }
 
 fn prompt_fork_op(installed: &InstalledSkill, library_root: &Path) -> Result<ApplyOp> {
