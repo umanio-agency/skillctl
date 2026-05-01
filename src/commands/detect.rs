@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use cliclack::{input, intro, log, multiselect, outro, select};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -9,6 +9,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::cli::DetectArgs;
 use crate::commands::shared::short_hint;
 use crate::config;
+use crate::context::Context;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
@@ -20,7 +21,7 @@ enum LibDestChoice {
     Custom,
 }
 
-pub fn run(_args: DetectArgs) -> Result<()> {
+pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     intro("skills detect")?;
 
     let cfg = config::load()?;
@@ -66,14 +67,13 @@ pub fn run(_args: DetectArgs) -> Result<()> {
         return Ok(());
     }
 
-    let mut prompt = multiselect("New skills to add to the library").required(true);
-    for s in &new_skills {
-        let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
-        prompt = prompt.item(s.clone(), &s.name, hint);
+    let selected = select_new_skills(&args, ctx, &new_skills)?;
+    if selected.is_empty() {
+        outro("no skills selected")?;
+        return Ok(());
     }
-    let selected: Vec<Skill> = prompt.interact()?;
 
-    let lib_dest_relative = pick_library_destination(&library_root)?;
+    let lib_dest_relative = resolve_target(&args, ctx, &library_root)?;
 
     let mut applies: Vec<(Skill, PathBuf, PathBuf)> = Vec::new();
     for skill in selected {
@@ -140,6 +140,54 @@ pub fn run(_args: DetectArgs) -> Result<()> {
 
     outro(format!("added {} skill(s) to the library", applies.len()))?;
     Ok(())
+}
+
+fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> Result<Vec<Skill>> {
+    if args.all {
+        return Ok(new_skills.to_vec());
+    }
+    if !args.skills.is_empty() {
+        let mut chosen = Vec::with_capacity(args.skills.len());
+        for name in &args.skills {
+            let skill = new_skills
+                .iter()
+                .find(|s| s.name == *name)
+                .ok_or_else(|| {
+                    anyhow!("no detected skill named `{name}` (it may already be in .skills.toml)")
+                })?;
+            chosen.push(skill.clone());
+        }
+        return Ok(chosen);
+    }
+    if !ctx.interactive {
+        return Err(anyhow!(
+            "no skills selected — pass --skill <name> (repeatable) or --all"
+        ));
+    }
+    let mut prompt = multiselect("New skills to add to the library").required(true);
+    for s in new_skills {
+        let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+        prompt = prompt.item(s.clone(), &s.name, hint);
+    }
+    Ok(prompt.interact()?)
+}
+
+fn resolve_target(args: &DetectArgs, ctx: &Context, library_root: &Path) -> Result<PathBuf> {
+    if let Some(target) = &args.target {
+        if target.is_absolute() {
+            return Err(anyhow!(
+                "--target must be relative to the library root, got `{}`",
+                target.display()
+            ));
+        }
+        return Ok(target.clone());
+    }
+    if !ctx.interactive {
+        return Err(anyhow!(
+            "no library destination — pass --target <path> (relative to the library root)"
+        ));
+    }
+    pick_library_destination(library_root)
 }
 
 fn pick_library_destination(library_root: &Path) -> Result<PathBuf> {
