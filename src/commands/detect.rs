@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow};
-use cliclack::{input, intro, log, multiselect, outro, select};
+use anyhow::{Context as _, Result};
+use cliclack::{input, multiselect, select};
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -10,10 +11,12 @@ use crate::cli::DetectArgs;
 use crate::commands::shared::short_hint;
 use crate::config;
 use crate::context::Context;
+use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
+use crate::ui;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum LibDestChoice {
@@ -22,26 +25,29 @@ enum LibDestChoice {
 }
 
 pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
-    intro("skills detect")?;
+    ui::intro(ctx, "skills detect")?;
 
     let cfg = config::load()?;
-    let library = cfg
-        .library
-        .ok_or_else(|| anyhow!("no library configured — run `skills init <github-url>` first"))?;
+    let library = cfg.library.ok_or_else(|| {
+        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+    })?;
 
-    let library_root = config::library_cache_path(&library.url)?;
+    let library_root = config::library_cache_path(&library.url)
+        .map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
-        return Err(anyhow!(
+        return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
             library_root.display(),
             library.url
-        ));
+        ))
+        .into());
     }
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        log::warning(format!(
-            "could not refresh library cache ({e}); continuing with the cached version"
-        ))?;
+        ui::log_warning(
+            ctx,
+            format!("could not refresh library cache ({e}); continuing with the cached version"),
+        )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
@@ -63,32 +69,46 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         .collect();
 
     if new_skills.is_empty() {
-        outro("no new skills detected (everything is tracked in .skills.toml)")?;
+        ui::outro(ctx, "no new skills detected (everything is tracked in .skills.toml)")?;
+        emit_json(ctx, None, &[], None);
         return Ok(());
     }
 
     let selected = select_new_skills(&args, ctx, &new_skills)?;
     if selected.is_empty() {
-        outro("no skills selected")?;
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, None, &[], None);
         return Ok(());
     }
 
     let lib_dest_relative = resolve_target(&args, ctx, &library_root)?;
 
     let mut applies: Vec<(Skill, PathBuf, PathBuf)> = Vec::new();
+    let mut results: Vec<Value> = Vec::new();
     for skill in selected {
         let folder_name = skill.path.file_name().ok_or_else(|| {
-            anyhow!("skill folder has no name: {}", skill.path.display())
+            AppError::Config(format!(
+                "skill folder has no name: {}",
+                skill.path.display()
+            ))
         })?;
         let lib_relative = lib_dest_relative.join(folder_name);
         let lib_absolute = library_root.join(&lib_relative);
 
         if lib_absolute.exists() {
-            log::warning(format!(
-                "{} → {} already exists in the library; skipping",
-                skill.name,
-                lib_relative.display()
-            ))?;
+            ui::log_warning(
+                ctx,
+                format!(
+                    "{} → {} already exists in the library; skipping",
+                    skill.name,
+                    lib_relative.display()
+                ),
+            )?;
+            results.push(json!({
+                "name": skill.name,
+                "status": "skipped",
+                "reason": format!("{} already exists in library", lib_relative.display()),
+            }));
             continue;
         }
 
@@ -96,7 +116,8 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     }
 
     if applies.is_empty() {
-        outro("nothing to add")?;
+        ui::outro(ctx, "nothing to add")?;
+        emit_json(ctx, Some(&lib_dest_relative), &results, None);
         return Ok(());
     }
 
@@ -104,11 +125,14 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         fs_util::copy_dir_all(&skill.path, lib_absolute)?;
     }
     for (_, lib_relative, _) in &applies {
-        git::add_all(&library_root, lib_relative)?;
+        git::add_all(&library_root, lib_relative).map_err(|e| AppError::Git(e.to_string()))?;
     }
 
-    if !git::has_staged_changes(&library_root)? {
-        outro("no effective changes after adding")?;
+    if !git::has_staged_changes(&library_root)
+        .map_err(|e| AppError::Git(e.to_string()))?
+    {
+        ui::outro(ctx, "no effective changes after adding")?;
+        emit_json(ctx, Some(&lib_dest_relative), &results, None);
         return Ok(());
     }
 
@@ -118,8 +142,9 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     } else {
         format!("add skills: {}", names.join(", "))
     };
-    let new_sha = git::commit(&library_root, &message)?;
-    git::push(&library_root)?;
+    let new_sha =
+        git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
+    git::push(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -131,38 +156,82 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
             name: skill.name.clone(),
             source_path: lib_relative.clone(),
             source_sha: new_sha.clone(),
-            destination: local_destination,
+            destination: local_destination.clone(),
             installed_at: installed_at.clone(),
         });
-        log::success(format!("{} → {}", skill.name, lib_relative.display()))?;
+        ui::log_success(ctx, format!("{} → {}", skill.name, lib_relative.display()))?;
+        results.push(json!({
+            "name": skill.name,
+            "status": "added",
+            "library_path": lib_relative.display().to_string(),
+            "local_path": local_destination.display().to_string(),
+            "source_sha": new_sha,
+        }));
     }
     project_config::save(&cwd, &project_cfg)?;
 
-    outro(format!("added {} skill(s) to the library", applies.len()))?;
+    ui::outro(ctx, format!("added {} skill(s) to the library", applies.len()))?;
+    emit_json(
+        ctx,
+        Some(&lib_dest_relative),
+        &results,
+        Some((new_sha.as_str(), message.as_str())),
+    );
     Ok(())
 }
 
-fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> Result<Vec<Skill>> {
+fn emit_json(
+    ctx: &Context,
+    target: Option<&PathBuf>,
+    results: &[Value],
+    commit: Option<(&str, &str)>,
+) {
+    if !ctx.json {
+        return;
+    }
+    let added = results.iter().filter(|r| r["status"] == "added").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let commit_value = commit.map(|(sha, message)| {
+        json!({"sha": sha, "message": message})
+    });
+    let out = json!({
+        "command": "detect",
+        "target": target.map(|t| t.display().to_string()),
+        "results": results,
+        "commit": commit_value,
+        "summary": {
+            "added": added,
+            "skipped": skipped,
+        },
+    });
+    println!("{out}");
+}
+
+fn select_new_skills(
+    args: &DetectArgs,
+    ctx: &Context,
+    new_skills: &[Skill],
+) -> Result<Vec<Skill>> {
     if args.all {
         return Ok(new_skills.to_vec());
     }
     if !args.skills.is_empty() {
         let mut chosen = Vec::with_capacity(args.skills.len());
         for name in &args.skills {
-            let skill = new_skills
-                .iter()
-                .find(|s| s.name == *name)
-                .ok_or_else(|| {
-                    anyhow!("no detected skill named `{name}` (it may already be in .skills.toml)")
-                })?;
+            let skill = new_skills.iter().find(|s| s.name == *name).ok_or_else(|| {
+                AppError::Config(format!(
+                    "no detected skill named `{name}` (it may already be in .skills.toml)"
+                ))
+            })?;
             chosen.push(skill.clone());
         }
         return Ok(chosen);
     }
     if !ctx.interactive {
-        return Err(anyhow!(
-            "no skills selected — pass --skill <name> (repeatable) or --all"
-        ));
+        return Err(AppError::Config(
+            "no skills selected — pass --skill <name> (repeatable) or --all".into(),
+        )
+        .into());
     }
     let mut prompt = multiselect("New skills to add to the library").required(true);
     for s in new_skills {
@@ -175,17 +244,19 @@ fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> 
 fn resolve_target(args: &DetectArgs, ctx: &Context, library_root: &Path) -> Result<PathBuf> {
     if let Some(target) = &args.target {
         if target.is_absolute() {
-            return Err(anyhow!(
+            return Err(AppError::Config(format!(
                 "--target must be relative to the library root, got `{}`",
                 target.display()
-            ));
+            ))
+            .into());
         }
         return Ok(target.clone());
     }
     if !ctx.interactive {
-        return Err(anyhow!(
-            "no library destination — pass --target <path> (relative to the library root)"
-        ));
+        return Err(AppError::Config(
+            "no library destination — pass --target <path> (relative to the library root)".into(),
+        )
+        .into());
     }
     pick_library_destination(library_root)
 }

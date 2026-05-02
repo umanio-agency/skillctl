@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
-use cliclack::{input, intro, log, multiselect, outro, select};
+use cliclack::{input, multiselect, select};
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -10,9 +11,11 @@ use crate::cli::{OnDivergence, PushArgs};
 use crate::commands::diff::{SkillStatus, classify};
 use crate::config;
 use crate::context::Context;
+use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
+use crate::ui;
 
 #[derive(Clone, Debug)]
 struct Candidate {
@@ -59,32 +62,36 @@ enum ApplyOp {
 }
 
 pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
-    intro("skills push")?;
+    ui::intro(ctx, "skills push")?;
 
     let cfg = config::load()?;
-    let library = cfg
-        .library
-        .ok_or_else(|| anyhow!("no library configured — run `skills init <github-url>` first"))?;
+    let library = cfg.library.ok_or_else(|| {
+        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+    })?;
 
-    let library_root = config::library_cache_path(&library.url)?;
+    let library_root = config::library_cache_path(&library.url)
+        .map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
-        return Err(anyhow!(
+        return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
             library_root.display(),
             library.url
-        ));
+        ))
+        .into());
     }
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        log::warning(format!(
-            "could not refresh library cache ({e}); diff is computed against the cached HEAD"
-        ))?;
+        ui::log_warning(
+            ctx,
+            format!("could not refresh library cache ({e}); diff is computed against the cached HEAD"),
+        )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
-        outro("no skills installed in this project (.skills.toml is empty)")?;
+        ui::outro(ctx, "no skills installed in this project (.skills.toml is empty)")?;
+        emit_json(ctx, &[], None);
         return Ok(());
     }
 
@@ -101,16 +108,21 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
 
     for c in &candidates {
         match &c.status {
-            SkillStatus::Unchanged => log::info(format!("{} — no local changes", c.name))?,
-            SkillStatus::LibraryAhead { .. } => log::info(format!(
-                "{} — library has updates (run `skills pull`)",
-                c.name
-            ))?,
-            SkillStatus::LocalMissing => log::warning(format!(
-                "{} — destination {} no longer exists; skipping",
-                c.name,
-                c.destination.display()
-            ))?,
+            SkillStatus::Unchanged => {
+                ui::log_info(ctx, format!("{} — no local changes", c.name))?
+            }
+            SkillStatus::LibraryAhead { .. } => ui::log_info(
+                ctx,
+                format!("{} — library has updates (run `skills pull`)", c.name),
+            )?,
+            SkillStatus::LocalMissing => ui::log_warning(
+                ctx,
+                format!(
+                    "{} — destination {} no longer exists; skipping",
+                    c.name,
+                    c.destination.display()
+                ),
+            )?,
             _ => {}
         }
     }
@@ -128,16 +140,19 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .collect();
 
     if pushable.is_empty() {
-        outro("nothing to push")?;
+        ui::outro(ctx, "nothing to push")?;
+        emit_json(ctx, &[], None);
         return Ok(());
     }
 
     let selected_indices = select_pushable(&args, ctx, &pushable)?;
     if selected_indices.is_empty() {
-        outro("no skills selected")?;
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, &[], None);
         return Ok(());
     }
 
+    let mut results: Vec<Value> = Vec::new();
     let mut applies: Vec<Apply> = Vec::new();
     for idx in &selected_indices {
         let candidate = pushable
@@ -156,10 +171,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 let choice = if let Some(policy) = args.on_divergence {
                     DivergenceChoice::from(policy)
                 } else if !ctx.interactive {
-                    log::warning(format!(
-                        "{} diverged but no --on-divergence policy provided; skipping",
-                        candidate.name
-                    ))?;
+                    ui::log_warning(
+                        ctx,
+                        format!(
+                            "{} diverged but no --on-divergence policy provided; skipping",
+                            candidate.name
+                        ),
+                    )?;
                     DivergenceChoice::Skip
                 } else {
                     select(format!(
@@ -187,7 +205,12 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     DivergenceChoice::Overwrite => Some(ApplyOp::Update),
                     DivergenceChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
                     DivergenceChoice::Skip => {
-                        log::info(format!("skipped {}", candidate.name))?;
+                        ui::log_info(ctx, format!("skipped {}", candidate.name))?;
+                        results.push(json!({
+                            "name": candidate.name,
+                            "status": "skipped",
+                            "reason": "diverged; --on-divergence skip",
+                        }));
                         None
                     }
                 }
@@ -197,7 +220,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     match policy {
                         OnDivergence::Skip => LibMissingChoice::Skip,
                         OnDivergence::Overwrite => {
-                            log::warning(format!(
+                            ui::log_warning(ctx, format!(
                                 "{} is removed from the library; --on-divergence overwrite cannot apply (use the interactive flow for fork)",
                                 candidate.name
                             ))?;
@@ -205,10 +228,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                         }
                     }
                 } else if !ctx.interactive {
-                    log::warning(format!(
-                        "{} is removed from the library and fork is interactive-only; skipping",
-                        candidate.name
-                    ))?;
+                    ui::log_warning(
+                        ctx,
+                        format!(
+                            "{} is removed from the library and fork is interactive-only; skipping",
+                            candidate.name
+                        ),
+                    )?;
                     LibMissingChoice::Skip
                 } else {
                     select(format!(
@@ -230,7 +256,12 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 match choice {
                     LibMissingChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
                     LibMissingChoice::Skip => {
-                        log::info(format!("skipped {}", candidate.name))?;
+                        ui::log_info(ctx, format!("skipped {}", candidate.name))?;
+                        results.push(json!({
+                            "name": candidate.name,
+                            "status": "skipped",
+                            "reason": "removed from library; fork is interactive-only",
+                        }));
                         None
                     }
                 }
@@ -247,7 +278,8 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     }
 
     if applies.is_empty() {
-        outro("nothing to push after conflict resolution")?;
+        ui::outro(ctx, "nothing to push after conflict resolution")?;
+        emit_json(ctx, &results, None);
         return Ok(());
     }
 
@@ -267,11 +299,15 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             ),
         };
         fs_util::replace_folder_contents(&local_dir, &library_dir)?;
-        git::add_all(&library_root, &library_relative)?;
+        git::add_all(&library_root, &library_relative)
+            .map_err(|e| AppError::Git(e.to_string()))?;
     }
 
-    if !git::has_staged_changes(&library_root)? {
-        outro("no effective changes after applying selections")?;
+    if !git::has_staged_changes(&library_root)
+        .map_err(|e| AppError::Git(e.to_string()))?
+    {
+        ui::outro(ctx, "no effective changes after applying selections")?;
+        emit_json(ctx, &results, None);
         return Ok(());
     }
 
@@ -292,23 +328,29 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .clone()
         .unwrap_or_else(|| build_commit_message(&updates, &adds));
 
-    let new_sha = git::commit(&library_root, &message)?;
-    git::push(&library_root)?;
+    let new_sha =
+        git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
+    git::push(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .context("formatting installation timestamp")?;
-
-    let mut updated_count = 0usize;
-    let mut forked_count = 0usize;
 
     for apply in &applies {
         match &apply.op {
             ApplyOp::Update => {
                 let entry = &mut project_cfg.installed[apply.candidate_index];
                 entry.source_sha = new_sha.clone();
-                log::success(format!("{} → {}", entry.name, short_sha(&new_sha)))?;
-                updated_count += 1;
+                ui::log_success(
+                    ctx,
+                    format!("{} → {}", entry.name, short_sha(&new_sha)),
+                )?;
+                results.push(json!({
+                    "name": entry.name,
+                    "status": "pushed",
+                    "operation": "update",
+                    "source_sha": new_sha,
+                }));
             }
             ApplyOp::Fork {
                 new_name,
@@ -327,6 +369,8 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                         format!("renaming {} -> {}", abs_old.display(), abs_new.display())
                     })?;
                 }
+                let original_name =
+                    project_cfg.installed[apply.candidate_index].name.clone();
                 project_cfg.installed[apply.candidate_index] = InstalledSkill {
                     name: new_name.clone(),
                     source_path: new_library_path.clone(),
@@ -334,16 +378,27 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     destination: new_local_destination.clone(),
                     installed_at: installed_at.clone(),
                 };
-                log::success(format!("forked → {} ({})", new_name, short_sha(&new_sha)))?;
-                forked_count += 1;
+                ui::log_success(
+                    ctx,
+                    format!("forked → {} ({})", new_name, short_sha(&new_sha)),
+                )?;
+                results.push(json!({
+                    "name": original_name,
+                    "status": "forked",
+                    "operation": "fork",
+                    "new_name": new_name,
+                    "new_source_path": new_library_path.display().to_string(),
+                    "source_sha": new_sha,
+                }));
             }
         }
     }
     project_config::save(&cwd, &project_cfg)?;
 
-    let total = updated_count + forked_count;
-    let skipped = selected_indices.len() - total;
-    let summary = match (updated_count, forked_count, skipped) {
+    let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
+    let forked = results.iter().filter(|r| r["status"] == "forked").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let summary = match (pushed, forked, skipped) {
         (u, 0, 0) => format!("pushed {u} skill(s)"),
         (0, f, 0) => format!("forked {f} skill(s)"),
         (u, f, 0) => format!("pushed {u}, forked {f}"),
@@ -351,8 +406,36 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         (0, f, s) => format!("forked {f}, skipped {s}"),
         (u, f, s) => format!("pushed {u}, forked {f}, skipped {s}"),
     };
-    outro(summary)?;
+    ui::outro(ctx, summary)?;
+    emit_json(
+        ctx,
+        &results,
+        Some((new_sha.as_str(), message.as_str())),
+    );
     Ok(())
+}
+
+fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
+    if !ctx.json {
+        return;
+    }
+    let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
+    let forked = results.iter().filter(|r| r["status"] == "forked").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let commit_value = commit.map(|(sha, message)| {
+        json!({"sha": sha, "message": message})
+    });
+    let out = json!({
+        "command": "push",
+        "results": results,
+        "commit": commit_value,
+        "summary": {
+            "pushed": pushed,
+            "forked": forked,
+            "skipped": skipped,
+        },
+    });
+    println!("{out}");
 }
 
 fn select_pushable(
@@ -370,16 +453,19 @@ fn select_pushable(
                 .iter()
                 .find(|c| c.name == *name)
                 .ok_or_else(|| {
-                    anyhow!("no pushable skill named `{name}` (skill is unchanged, missing locally, or unknown)")
+                    AppError::Config(format!(
+                        "no pushable skill named `{name}` (skill is unchanged, missing locally, or unknown)"
+                    ))
                 })?;
             chosen.push(candidate.index);
         }
         return Ok(chosen);
     }
     if !ctx.interactive {
-        return Err(anyhow!(
-            "no skills selected — pass --skill <name> (repeatable) or --all"
-        ));
+        return Err(AppError::Config(
+            "no skills selected — pass --skill <name> (repeatable) or --all".into(),
+        )
+        .into());
     }
     let mut prompt = multiselect("Skills to push").required(true);
     for c in pushable {
@@ -417,10 +503,11 @@ fn prompt_fork_op(installed: &InstalledSkill, library_root: &Path) -> Result<App
     };
 
     if library_root.join(&new_library_path).exists() {
-        return Err(anyhow!(
+        return Err(AppError::Conflict(format!(
             "a folder already exists at {} in the library — pick a different name",
             new_library_path.display()
-        ));
+        ))
+        .into());
     }
 
     let local_parent = installed
