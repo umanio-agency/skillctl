@@ -70,6 +70,23 @@ For each pushable skill, `skills push` runs a content diff (via git blob hashes)
 
 **Fork** (creating a new library skill from local edits) is interactive-only in v1. In non-interactive mode, divergent skills are skipped if `--on-divergence` isn't `overwrite`.
 
+### `skills pull` — refresh installed skills from the library
+
+```sh
+skills pull --skill <name> [--skill <name> …]
+skills pull --all
+```
+
+| Flag | Purpose |
+|---|---|
+| `--skill <name>` | Pull only specific skills by name (repeatable). |
+| `--all` | Pull every skill that has library updates available. |
+| `--on-divergence <overwrite\|skip>` | Strategy for skills that changed both locally **and** in the library since install. Default behaviour when omitted: skip with a warning. |
+
+For each pullable skill, `skills pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow.
+
+**Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is interactive-only in v1. In non-interactive mode, divergent skills are skipped if `--on-divergence` isn't `overwrite`.
+
 ### `skills detect` — find new local skills and add them to the library
 
 ```sh
@@ -127,6 +144,18 @@ skills push --all
 skills push --all --on-divergence overwrite
 ```
 
+### Pull every available library update
+
+```sh
+skills pull --all
+```
+
+### Force-pull everything, even where local has unrelated edits
+
+```sh
+skills pull --all --on-divergence overwrite
+```
+
 ### Contribute every new local skill back to the library
 
 ```sh
@@ -152,4 +181,4 @@ skills push --skill review --skill security-review --message "polish: tighter re
 - `skills` does not handle merges. When local and library both moved past the recorded `source_sha`, the operator chooses one side; there is no automatic three-way merge.
 - `skills push` always produces **one commit per run**, regardless of how many skills are touched.
 - Forking a divergent skill into a new library skill is currently **interactive-only**. To do it from an agent, ask the user.
-- There is currently no `pull` command — the inverse direction (refresh local installs from a moved library) is on the backlog.
+- Forking *locally* during `pull` (preserving local edits under a new name) is also interactive-only.

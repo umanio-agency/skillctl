@@ -29,6 +29,8 @@ pub enum Command {
     Add(AddArgs),
     /// Push local edits to installed skills back to the library.
     Push(PushArgs),
+    /// Pull library updates into installed skills.
+    Pull(PullArgs),
     /// Find skills created locally and offer to add them to the library.
     Detect(DetectArgs),
 }
@@ -83,6 +85,23 @@ pub struct PushArgs {
     /// Override the auto-generated commit message.
     #[arg(long, value_name = "MESSAGE")]
     pub message: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct PullArgs {
+    /// Skill name to pull. Repeatable. Mutually exclusive with --all.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    pub skills: Vec<String>,
+
+    /// Pull every skill that has library updates available (LibraryAhead + diverged).
+    #[arg(long, conflicts_with = "skills")]
+    pub all: bool,
+
+    /// Resolution strategy for divergent skills (skip|overwrite). Fork-locally
+    /// is interactive-only in v1 — non-interactive runs fall back to skip when
+    /// this flag is omitted.
+    #[arg(long, value_enum, value_name = "POLICY")]
+    pub on_divergence: Option<OnDivergence>,
 }
 
 #[derive(Args, Debug)]
