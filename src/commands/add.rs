@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, anyhow};
-use cliclack::{input, intro, log, multiselect, outro, outro_cancel, select};
+use anyhow::{Context as _, Result};
+use cliclack::{input, multiselect, select};
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -10,10 +11,12 @@ use crate::cli::{AddArgs, OnConflict};
 use crate::commands::shared::{matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
+use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
+use crate::ui;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum DestChoice {
@@ -43,59 +46,66 @@ impl From<OnConflict> for ConflictAction {
 }
 
 pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
-    intro("skills add")?;
+    ui::intro(ctx, "skills add")?;
 
     let cfg = config::load()?;
-    let library = cfg
-        .library
-        .ok_or_else(|| anyhow!("no library configured — run `skills init <github-url>` first"))?;
+    let library = cfg.library.ok_or_else(|| {
+        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+    })?;
 
-    let library_root = config::library_cache_path(&library.url)?;
+    let library_root = config::library_cache_path(&library.url)
+        .map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
-        return Err(anyhow!(
+        return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
             library_root.display(),
             library.url
-        ));
+        ))
+        .into());
     }
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        log::warning(format!(
-            "could not refresh library cache ({e}); using cached version"
-        ))?;
+        ui::log_warning(
+            ctx,
+            format!("could not refresh library cache ({e}); using cached version"),
+        )?;
     }
 
     let skills = skill::discover(&library_root)?;
     if skills.is_empty() {
-        outro(format!("no skills found in {}", library.url))?;
+        ui::outro(ctx, format!("no skills found in {}", library.url))?;
+        emit_json(ctx, None, &[]);
         return Ok(());
     }
 
     let selected = select_skills(&args, ctx, &skills)?;
     if selected.is_empty() {
-        outro("no skills selected")?;
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, None, &[]);
         return Ok(());
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let dest_root = resolve_destination(&args, ctx, &cwd)?;
-
     let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
 
-    let source_sha = git::head_sha(&library_root)?;
+    let source_sha =
+        git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .context("formatting installation timestamp")?;
 
     let mut project_cfg = project_config::load(&cwd)?;
-    let mut installed_count = 0usize;
-    let mut skipped_count = 0usize;
+    let mut results: Vec<Value> = Vec::new();
+    let mut aborted = false;
 
     for skill in selected {
-        let folder_name = skill
-            .path
-            .file_name()
-            .ok_or_else(|| anyhow!("skill has no folder name: {}", skill.path.display()))?;
+        let folder_name = skill.path.file_name().ok_or_else(|| {
+            AppError::Config(format!(
+                "skill has no folder name: {}",
+                skill.path.display()
+            ))
+        })?;
         let dest = dest_root.join(folder_name);
 
         if dest.exists() {
@@ -106,14 +116,24 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                         .with_context(|| format!("removing {}", dest.display()))?;
                 }
                 ConflictAction::Skip => {
-                    log::info(format!("skipped {}", skill.name))?;
-                    skipped_count += 1;
+                    ui::log_info(ctx, format!("skipped {}", skill.name))?;
+                    results.push(json!({
+                        "name": skill.name,
+                        "status": "skipped",
+                        "reason": format!("destination {} already exists", dest.display()),
+                    }));
                     continue;
                 }
                 ConflictAction::Abort => {
                     project_config::save(&cwd, &project_cfg)?;
-                    outro_cancel("aborted")?;
-                    return Ok(());
+                    ui::outro_cancel(ctx, "aborted")?;
+                    results.push(json!({
+                        "name": skill.name,
+                        "status": "aborted",
+                        "reason": format!("destination {} already exists", dest.display()),
+                    }));
+                    aborted = true;
+                    break;
                 }
             }
         }
@@ -130,25 +150,63 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                 )
             })?
             .to_path_buf();
+        let destination_rel = fs_util::relative_to_or_self(&dest, &cwd);
         project_cfg.installed.push(InstalledSkill {
             name: skill.name.clone(),
             source_path,
             source_sha: source_sha.clone(),
-            destination: fs_util::relative_to_or_self(&dest, &cwd),
+            destination: destination_rel.clone(),
             installed_at: installed_at.clone(),
         });
-        log::success(format!("{} → {}", skill.name, dest.display()))?;
-        installed_count += 1;
+        ui::log_success(ctx, format!("{} → {}", skill.name, dest.display()))?;
+        results.push(json!({
+            "name": skill.name,
+            "status": "installed",
+            "path": destination_rel.display().to_string(),
+            "source_sha": source_sha,
+        }));
     }
 
     project_config::save(&cwd, &project_cfg)?;
 
-    let summary = match (installed_count, skipped_count) {
-        (n, 0) => format!("{n} skill(s) installed"),
-        (n, s) => format!("{n} installed, {s} skipped"),
-    };
-    outro(summary)?;
+    if !aborted {
+        ui::outro(ctx, summary_text(&results))?;
+    }
+    emit_json(ctx, Some(&dest_root), &results);
     Ok(())
+}
+
+fn emit_json(ctx: &Context, destination: Option<&PathBuf>, results: &[Value]) {
+    if !ctx.json {
+        return;
+    }
+    let installed = results.iter().filter(|r| r["status"] == "installed").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let aborted = results.iter().filter(|r| r["status"] == "aborted").count();
+    let out = json!({
+        "command": "add",
+        "destination": destination.map(|d| d.display().to_string()),
+        "results": results,
+        "summary": {
+            "installed": installed,
+            "skipped": skipped,
+            "aborted": aborted,
+        },
+    });
+    println!("{out}");
+}
+
+fn summary_text(results: &[Value]) -> String {
+    let installed = results.iter().filter(|r| r["status"] == "installed").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let aborted = results.iter().filter(|r| r["status"] == "aborted").count();
+    if aborted > 0 {
+        format!("{installed} installed, {skipped} skipped, {aborted} aborted")
+    } else if skipped > 0 {
+        format!("{installed} installed, {skipped} skipped")
+    } else {
+        format!("{installed} skill(s) installed")
+    }
 }
 
 fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<Skill>> {
@@ -158,10 +216,9 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
     if !args.skills.is_empty() {
         let mut chosen = Vec::with_capacity(args.skills.len());
         for name in &args.skills {
-            let skill = skills
-                .iter()
-                .find(|s| s.name == *name)
-                .ok_or_else(|| anyhow!("no skill named `{name}` in the library"))?;
+            let skill = skills.iter().find(|s| s.name == *name).ok_or_else(|| {
+                AppError::Config(format!("no skill named `{name}` in the library"))
+            })?;
             chosen.push(skill.clone());
         }
         return Ok(chosen);
@@ -173,15 +230,15 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
             .cloned()
             .collect();
         if matched.is_empty() {
-            return Err(anyhow!(
+            return Err(AppError::Config(format!(
                 "no skills match the requested tag(s): {}",
                 args.tags.join(", ")
-            ));
+            ))
+            .into());
         }
         if !ctx.interactive {
             return Ok(matched);
         }
-        // Interactive: tag pre-filters the multi-select; user still picks.
         let mut prompt = multiselect("Skills to install (tag-filtered)").required(true);
         for s in &matched {
             let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
@@ -190,9 +247,11 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
         return Ok(prompt.interact()?);
     }
     if !ctx.interactive {
-        return Err(anyhow!(
+        return Err(AppError::Config(
             "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all"
-        ));
+                .into(),
+        )
+        .into());
     }
     let mut prompt = multiselect("Skills to install").required(true);
     for s in skills {
@@ -207,9 +266,10 @@ fn resolve_destination(args: &AddArgs, ctx: &Context, cwd: &std::path::Path) -> 
         return Ok(dest.clone());
     }
     if !ctx.interactive {
-        return Err(anyhow!(
-            "no install destination — pass --dest <path>"
-        ));
+        return Err(AppError::Config(
+            "no install destination — pass --dest <path>".into(),
+        )
+        .into());
     }
     let existing = skill::find_skills_folders(cwd)?
         .into_iter()
@@ -227,10 +287,11 @@ fn resolve_conflict(
         return Ok(policy);
     }
     if !ctx.interactive {
-        return Err(anyhow!(
+        return Err(AppError::Conflict(format!(
             "destination `{}` already exists — pass --on-conflict overwrite|skip|abort",
             dest.display()
-        ));
+        ))
+        .into());
     }
     Ok(select(format!(
         "`{}` already exists — what do you want to do?",

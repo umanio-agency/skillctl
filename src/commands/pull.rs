@@ -2,15 +2,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
-use cliclack::{input, intro, log, multiselect, outro, select};
+use cliclack::{input, multiselect, select};
+use serde_json::{Value, json};
 
 use crate::cli::{OnDivergence, PullArgs};
 use crate::commands::diff::{SkillStatus, classify};
 use crate::config;
 use crate::context::Context;
+use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
+use crate::ui;
 
 #[derive(Clone, Debug)]
 struct Candidate {
@@ -51,32 +54,36 @@ enum ApplyOp {
 }
 
 pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
-    intro("skills pull")?;
+    ui::intro(ctx, "skills pull")?;
 
     let cfg = config::load()?;
-    let library = cfg
-        .library
-        .ok_or_else(|| anyhow!("no library configured — run `skills init <github-url>` first"))?;
+    let library = cfg.library.ok_or_else(|| {
+        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+    })?;
 
-    let library_root = config::library_cache_path(&library.url)?;
+    let library_root = config::library_cache_path(&library.url)
+        .map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
-        return Err(anyhow!(
+        return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
             library_root.display(),
             library.url
-        ));
+        ))
+        .into());
     }
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        log::warning(format!(
-            "could not refresh library cache ({e}); diff is computed against the cached HEAD"
-        ))?;
+        ui::log_warning(
+            ctx,
+            format!("could not refresh library cache ({e}); diff is computed against the cached HEAD"),
+        )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
-        outro("no skills installed in this project (.skills.toml is empty)")?;
+        ui::outro(ctx, "no skills installed in this project (.skills.toml is empty)")?;
+        emit_json(ctx, &[]);
         return Ok(());
     }
 
@@ -93,20 +100,31 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
 
     for c in &candidates {
         match &c.status {
-            SkillStatus::Unchanged => log::info(format!("{} — up to date", c.name))?,
-            SkillStatus::LocalChangesOnly => log::info(format!(
-                "{} — local edits without library updates (use `skills push`)",
-                c.name
-            ))?,
-            SkillStatus::LibraryMissing => log::warning(format!(
-                "{} — removed from library; consider editing .skills.toml",
-                c.name
-            ))?,
-            SkillStatus::LocalMissing => log::warning(format!(
-                "{} — destination {} no longer exists; can't pull",
-                c.name,
-                c.destination.display()
-            ))?,
+            SkillStatus::Unchanged => {
+                ui::log_info(ctx, format!("{} — up to date", c.name))?
+            }
+            SkillStatus::LocalChangesOnly => ui::log_info(
+                ctx,
+                format!(
+                    "{} — local edits without library updates (use `skills push`)",
+                    c.name
+                ),
+            )?,
+            SkillStatus::LibraryMissing => ui::log_warning(
+                ctx,
+                format!(
+                    "{} — removed from library; consider editing .skills.toml",
+                    c.name
+                ),
+            )?,
+            SkillStatus::LocalMissing => ui::log_warning(
+                ctx,
+                format!(
+                    "{} — destination {} no longer exists; can't pull",
+                    c.name,
+                    c.destination.display()
+                ),
+            )?,
             _ => {}
         }
     }
@@ -122,16 +140,19 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         .collect();
 
     if pullable.is_empty() {
-        outro("everything is up to date")?;
+        ui::outro(ctx, "everything is up to date")?;
+        emit_json(ctx, &[]);
         return Ok(());
     }
 
     let selected_indices = select_pullable(&args, ctx, &pullable)?;
     if selected_indices.is_empty() {
-        outro("no skills selected")?;
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, &[]);
         return Ok(());
     }
 
+    let mut results: Vec<Value> = Vec::new();
     let mut applies: Vec<Apply> = Vec::new();
     for idx in &selected_indices {
         let candidate = pullable
@@ -150,10 +171,13 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                 let choice = if let Some(policy) = args.on_divergence {
                     DivergenceChoice::from(policy)
                 } else if !ctx.interactive {
-                    log::warning(format!(
-                        "{} diverged but no --on-divergence policy provided; skipping",
-                        candidate.name
-                    ))?;
+                    ui::log_warning(
+                        ctx,
+                        format!(
+                            "{} diverged but no --on-divergence policy provided; skipping",
+                            candidate.name
+                        ),
+                    )?;
                     DivergenceChoice::Skip
                 } else {
                     select(format!(
@@ -181,7 +205,12 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                     DivergenceChoice::Overwrite => Some(ApplyOp::Pull),
                     DivergenceChoice::ForkLocal => Some(prompt_local_fork_op(installed, &cwd)?),
                     DivergenceChoice::Skip => {
-                        log::info(format!("skipped {}", candidate.name))?;
+                        ui::log_info(ctx, format!("skipped {}", candidate.name))?;
+                        results.push(json!({
+                            "name": candidate.name,
+                            "status": "skipped",
+                            "reason": "diverged; --on-divergence skip",
+                        }));
                         None
                     }
                 }
@@ -198,13 +227,13 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     }
 
     if applies.is_empty() {
-        outro("nothing to pull after conflict resolution")?;
+        ui::outro(ctx, "nothing to pull after conflict resolution")?;
+        emit_json(ctx, &results);
         return Ok(());
     }
 
-    let new_sha = git::head_sha(&library_root)?;
-    let mut pulled_count = 0usize;
-    let mut forked_count = 0usize;
+    let new_sha =
+        git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     for apply in &applies {
         let installed_name = project_cfg.installed[apply.candidate_index].name.clone();
@@ -219,8 +248,15 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
             ApplyOp::Pull => {
                 fs_util::replace_folder_contents(&library_dir, &local_dir)?;
                 project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
-                log::success(format!("{} → {}", installed_name, short_sha(&new_sha)))?;
-                pulled_count += 1;
+                ui::log_success(
+                    ctx,
+                    format!("{} → {}", installed_name, short_sha(&new_sha)),
+                )?;
+                results.push(json!({
+                    "name": installed_name,
+                    "status": "pulled",
+                    "source_sha": new_sha,
+                }));
             }
             ApplyOp::ForkLocal { local_fork_name } => {
                 let fork_dest = local_fork_destination(
@@ -229,44 +265,82 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                     local_fork_name,
                 );
                 if fork_dest.exists() {
-                    return Err(anyhow!(
+                    return Err(AppError::Conflict(format!(
                         "cannot fork-locally: target {} already exists",
                         fork_dest.display()
-                    ));
+                    ))
+                    .into());
                 }
                 fs::rename(&local_dir, &fork_dest).with_context(|| {
                     format!("renaming {} -> {}", local_dir.display(), fork_dest.display())
                 })?;
                 fs_util::copy_dir_all(&library_dir, &local_dir)?;
                 project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
-                log::success(format!(
-                    "{} → {} (local fork preserved at {})",
-                    installed_name,
-                    short_sha(&new_sha),
-                    fs_util::relative_to_or_self(&fork_dest, &cwd).display()
-                ))?;
-                pulled_count += 1;
-                forked_count += 1;
+                let fork_rel = fs_util::relative_to_or_self(&fork_dest, &cwd);
+                ui::log_success(
+                    ctx,
+                    format!(
+                        "{} → {} (local fork preserved at {})",
+                        installed_name,
+                        short_sha(&new_sha),
+                        fork_rel.display()
+                    ),
+                )?;
+                results.push(json!({
+                    "name": installed_name,
+                    "status": "pulled",
+                    "fork_local": local_fork_name,
+                    "fork_local_path": fork_rel.display().to_string(),
+                    "source_sha": new_sha,
+                }));
             }
         }
     }
 
     project_config::save(&cwd, &project_cfg)?;
 
-    let skipped = selected_indices.len() - pulled_count;
-    let summary = if forked_count > 0 {
+    let pulled = results.iter().filter(|r| r["status"] == "pulled").count();
+    let forked = results
+        .iter()
+        .filter(|r| r["status"] == "pulled" && !r["fork_local"].is_null())
+        .count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let summary = if forked > 0 {
         if skipped > 0 {
-            format!("pulled {pulled_count} ({forked_count} with local fork), skipped {skipped}")
+            format!("pulled {pulled} ({forked} with local fork), skipped {skipped}")
         } else {
-            format!("pulled {pulled_count} ({forked_count} with local fork)")
+            format!("pulled {pulled} ({forked} with local fork)")
         }
     } else if skipped > 0 {
-        format!("pulled {pulled_count}, skipped {skipped}")
+        format!("pulled {pulled}, skipped {skipped}")
     } else {
-        format!("pulled {pulled_count} skill(s)")
+        format!("pulled {pulled} skill(s)")
     };
-    outro(summary)?;
+    ui::outro(ctx, summary)?;
+    emit_json(ctx, &results);
     Ok(())
+}
+
+fn emit_json(ctx: &Context, results: &[Value]) {
+    if !ctx.json {
+        return;
+    }
+    let pulled = results.iter().filter(|r| r["status"] == "pulled").count();
+    let forked_locally = results
+        .iter()
+        .filter(|r| r["status"] == "pulled" && !r["fork_local"].is_null())
+        .count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let out = json!({
+        "command": "pull",
+        "results": results,
+        "summary": {
+            "pulled": pulled,
+            "forked_locally": forked_locally,
+            "skipped": skipped,
+        },
+    });
+    println!("{out}");
 }
 
 fn select_pullable(args: &PullArgs, ctx: &Context, pullable: &[&Candidate]) -> Result<Vec<usize>> {
@@ -280,16 +354,19 @@ fn select_pullable(args: &PullArgs, ctx: &Context, pullable: &[&Candidate]) -> R
                 .iter()
                 .find(|c| c.name == *name)
                 .ok_or_else(|| {
-                    anyhow!("no pullable skill named `{name}` (skill is up to date or unknown)")
+                    AppError::Config(format!(
+                        "no pullable skill named `{name}` (skill is up to date or unknown)"
+                    ))
                 })?;
             chosen.push(candidate.index);
         }
         return Ok(chosen);
     }
     if !ctx.interactive {
-        return Err(anyhow!(
-            "no skills selected — pass --skill <name> (repeatable) or --all"
-        ));
+        return Err(AppError::Config(
+            "no skills selected — pass --skill <name> (repeatable) or --all".into(),
+        )
+        .into());
     }
     let mut prompt = multiselect("Skills to pull").required(true);
     for c in pullable {
@@ -318,10 +395,11 @@ fn prompt_local_fork_op(installed: &InstalledSkill, cwd: &Path) -> Result<ApplyO
 
     let fork_dest = local_fork_destination(installed, cwd, &new_name);
     if fork_dest.exists() {
-        return Err(anyhow!(
+        return Err(AppError::Conflict(format!(
             "a folder already exists at {} — pick a different name",
             fork_dest.display()
-        ));
+        ))
+        .into());
     }
 
     Ok(ApplyOp::ForkLocal {

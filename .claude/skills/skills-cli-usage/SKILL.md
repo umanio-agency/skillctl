@@ -12,9 +12,41 @@ tags: [meta, agent-tooling]
 
 ## How non-interactive mode is selected
 
-`skills` auto-detects whether stdin and stdout are TTYs. When called from a script, agent, or pipe, it switches to non-interactive mode automatically. You can also force it explicitly with the global `--no-interaction` flag.
+`skills` auto-detects whether stdin and stdout are TTYs. When called from a script, agent, or pipe, it switches to non-interactive mode automatically. You can also force it explicitly with the global `--no-interaction` flag, or with `--json` (which implies it).
 
 In non-interactive mode, **every decision must come from a flag.** If a required input is missing, the command exits with a clear error rather than silently falling back to a prompt.
+
+## Structured output: `--json`
+
+The global `--json` flag suppresses the human-readable cliclack output and emits a single JSON object on stdout at the end of the command. `--json` implies `--no-interaction`. Errors continue to go to stderr.
+
+Per-command top-level shape:
+
+```jsonc
+// init
+{"command":"init","library":{"url":"…","cache_path":"…"}}
+
+// list
+{"command":"list","library":"…","skills":[{"name":"…","path":"…","description":"…|null","tags":["…"]}]}
+
+// add
+{"command":"add","destination":"…|null","results":[{"name":"…","status":"installed|skipped|aborted","…":"…"}],"summary":{"installed":N,"skipped":N,"aborted":N}}
+
+// push
+{"command":"push","results":[{"name":"…","status":"pushed|forked|skipped","operation":"update|fork","…":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"pushed":N,"forked":N,"skipped":N}}
+
+// pull
+{"command":"pull","results":[{"name":"…","status":"pulled|skipped","fork_local":"…|null","fork_local_path":"…","source_sha":"…"}],"summary":{"pulled":N,"forked_locally":N,"skipped":N}}
+
+// detect
+{"command":"detect","target":"…|null","results":[{"name":"…","status":"added|skipped","library_path":"…","local_path":"…","source_sha":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"added":N,"skipped":N}}
+```
+
+Stable rules:
+- The `command` field always matches the subcommand name.
+- `results[]` only contains skills that were *acted on* (installed, pushed, forked, pulled, added, or explicitly skipped). Skills that were silently no-ops (e.g. unchanged on `push`) are not in `results[]`. To enumerate everything, use `skills list --json`.
+- `summary` totals exactly equal the count of corresponding `status` values in `results[]`.
+- `commit` is `null` when no commit was made (nothing to apply, or library-only-read commands like `pull`/`list`).
 
 ## One-time setup: link a library
 
@@ -128,16 +160,21 @@ skills detect --all --target <library-path>
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.
 
-## Exit codes (v1)
+## Exit codes
 
-- `0` — success, including "nothing to do" outcomes (no changes to push, no new skills detected, etc.).
-- `1` — any error (missing config, missing flag in non-interactive mode, git failure, network failure, malformed args, etc.). The human-readable error is printed on stderr.
+- `0` — success, including "nothing to do" outcomes (no changes to push, no new skills detected, no skills to install, etc.).
+- `1` — generic / unexpected error.
+- `2` — **configuration error**: no library configured, library cache missing, malformed URL, missing required flag in non-interactive mode (e.g. `--dest`, `--skill`, `--target`), invalid skill name, malformed `.skills.toml`.
+- `3` — **conflict**: a destination already exists with no `--on-conflict` policy in non-interactive mode, a fork target collides in the library, or a local fork target collides.
+- `4` — **git error**: `git clone`/`fetch`/`commit`/`push`/`hash-object`/`ls-tree` failed (auth, network, missing user identity, etc.).
 
-Agents should treat anything non-zero as failure and read stderr for context. Finer-grained exit codes are tracked in the project's backlog.
+Agents should branch on exit code first, then optionally inspect stderr for context. Stdout in `--json` mode is always either a single JSON object (success or partial success) or empty (early failure before output is built).
 
 ## Output
 
-`skills` always prints a structured tree-style log to stdout (intro line, per-skill `log::*` lines, outro summary) regardless of mode. There is **no `--json` mode yet** — that's a planned future addition. For now, agents should prefer asserting on success/failure (exit code) and rely on side effects (`.skills.toml` contents, files in the destination, library remote state) for verification.
+`skills` prints a tree-style human log to stdout in interactive/default mode (intro line, per-skill `log::*` lines, outro summary). In `--json` mode, that human log is suppressed and a single structured JSON object lands on stdout instead — see "Structured output: `--json`" above for shapes.
+
+Errors always go to stderr regardless of mode.
 
 ## Recipes
 

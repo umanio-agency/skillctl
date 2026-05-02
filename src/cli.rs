@@ -11,9 +11,15 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 pub struct Cli {
     /// Force non-interactive mode. Required decisions must come from flags;
     /// the CLI will not fall back to a prompt. Auto-enabled when stdin or
-    /// stdout isn't a TTY.
+    /// stdout isn't a TTY, and implied by --json.
     #[arg(long, global = true)]
     pub no_interaction: bool,
+
+    /// Emit a structured JSON object to stdout (per-command schema documented
+    /// in skills-cli-usage). Implies --no-interaction; suppresses the
+    /// human-readable cliclack output.
+    #[arg(long, global = true)]
+    pub json: bool,
 
     #[command(subcommand)]
     pub command: Command,
