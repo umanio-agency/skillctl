@@ -1,15 +1,16 @@
 use anyhow::{Result, anyhow};
 
 use crate::cli::ListArgs;
+use crate::commands::shared::matches_tags;
 use crate::config;
 use crate::git;
 use crate::skill;
 
-pub fn run(_args: ListArgs) -> Result<()> {
+pub fn run(args: ListArgs) -> Result<()> {
     let cfg = config::load()?;
-    let library = cfg.library.ok_or_else(|| {
-        anyhow!("no library configured — run `skills init <github-url>` first")
-    })?;
+    let library = cfg
+        .library
+        .ok_or_else(|| anyhow!("no library configured — run `skills init <github-url>` first"))?;
 
     let repo = config::library_cache_path(&library.url)?;
     if !repo.exists() {
@@ -30,10 +31,25 @@ pub fn run(_args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    for s in skills {
+    let filtered: Vec<_> = skills
+        .into_iter()
+        .filter(|s| matches_tags(&s.tags, &args.tags, args.all_tags))
+        .collect();
+
+    if filtered.is_empty() {
+        println!("no skills match the requested tag(s): {}", args.tags.join(", "));
+        return Ok(());
+    }
+
+    for s in filtered {
+        let tags_suffix = if s.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", s.tags.join(", "))
+        };
         match &s.description {
-            Some(desc) => println!("  {} — {desc}", s.name),
-            None => println!("  {}", s.name),
+            Some(desc) => println!("  {}{tags_suffix} — {desc}", s.name),
+            None => println!("  {}{tags_suffix}", s.name),
         }
     }
     Ok(())
