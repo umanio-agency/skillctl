@@ -78,17 +78,18 @@ pub fn find_skills_folders(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Extract `name`, `description`, and `tags` from a leading YAML-style
-/// frontmatter block. Tolerant by design — only single-line values and the
-/// inline array form `tags: [a, b, c]` are parsed; any other key is ignored.
+/// frontmatter block. Tolerant by design — single-line values are parsed,
+/// `tags:` accepts both the inline array form (`[a, b, c]`) and the block
+/// form (subsequent indented `- item` lines), and any other key is ignored.
 fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>) {
-    let mut lines = raw.lines();
+    let mut lines = raw.lines().peekable();
     if lines.next().map(str::trim) != Some("---") {
         return (None, None, Vec::new());
     }
     let mut name = None;
     let mut description = None;
     let mut tags = Vec::new();
-    for line in lines {
+    while let Some(line) = lines.next() {
         if line.trim() == "---" {
             break;
         }
@@ -97,10 +98,42 @@ fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>)
         } else if let Some(rest) = line.strip_prefix("description:") {
             description = Some(clean_value(rest));
         } else if let Some(rest) = line.strip_prefix("tags:") {
-            tags = parse_tags_inline(rest);
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                // Block form: peek and consume `- item` lines until something else shows up.
+                while let Some(peek) = lines.peek() {
+                    let pt = peek.trim_start();
+                    if let Some(item) = pt.strip_prefix("- ") {
+                        let v = clean_value(item);
+                        if !v.is_empty() {
+                            tags.push(v);
+                        }
+                        lines.next();
+                    } else if pt == "-" {
+                        // Empty list item — skip.
+                        lines.next();
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                tags = parse_tags_inline(trimmed);
+            }
         }
     }
     (name, description, tags)
+}
+
+/// Read just the tags from a single SKILL.md. Returns an empty vector if the
+/// file has no frontmatter or no `tags:` field.
+pub fn read_tags(skill_md: &Path) -> Result<Vec<String>> {
+    if !skill_md.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(skill_md)
+        .with_context(|| format!("reading {}", skill_md.display()))?;
+    let (_, _, tags) = parse_frontmatter(&raw);
+    Ok(tags)
 }
 
 fn clean_value(raw: &str) -> String {
@@ -192,5 +225,34 @@ mod tests {
         let raw = "---\ntags: solo\n---\n";
         let (_, _, tags) = parse_frontmatter(raw);
         assert_eq!(tags, vec!["solo".to_string()]);
+    }
+
+    #[test]
+    fn parses_block_tag_form() {
+        let raw = "---\nname: foo\ntags:\n  - a\n  - b\n  - c\n---\n";
+        let (_, _, tags) = parse_frontmatter(raw);
+        assert_eq!(tags, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn parses_block_tag_with_quotes() {
+        let raw = "---\ntags:\n  - \"hello world\"\n  - 'foo'\n---\n";
+        let (_, _, tags) = parse_frontmatter(raw);
+        assert_eq!(tags, vec!["hello world".to_string(), "foo".to_string()]);
+    }
+
+    #[test]
+    fn block_tag_followed_by_more_keys() {
+        let raw = "---\ntags:\n  - a\n  - b\nname: after\n---\n";
+        let (name, _, tags) = parse_frontmatter(raw);
+        assert_eq!(tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(name.as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn empty_block_tag_form() {
+        let raw = "---\ntags:\nname: solo\n---\n";
+        let (_, _, tags) = parse_frontmatter(raw);
+        assert!(tags.is_empty());
     }
 }
