@@ -1,6 +1,7 @@
 ---
 name: skills-cli-usage
 description: How to drive the `skills` CLI non-interactively. Load PROACTIVELY when the user asks to install, push, or contribute Claude skills, or mentions a "skills library" / "skills repo". Covers every command's flag surface, exit codes, and end-to-end recipes so an agent can run `skills` without a TTY.
+tags: [meta, agent-tooling]
 ---
 
 # skills-cli-usage
@@ -32,25 +33,46 @@ skills init https://github.com/<owner>/<repo>
 
 ```sh
 skills list
+skills list --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
-Refreshes the library cache (best-effort `git fetch`) and prints every skill with its name and a one-line description. No flags needed.
+Refreshes the library cache (best-effort `git fetch`) and prints every skill with its name, any frontmatter tags in `[…]`, and a one-line description.
+
+| Flag | Purpose |
+|---|---|
+| `--tag <tag>` | Filter to skills carrying this tag. Repeatable; default semantics is union (any of the given tags). |
+| `--all-tags` | Switch to intersection (skill must carry every requested tag). Requires `--tag`. |
 
 ### `skills add` — install skills from the library into a project
 
 ```sh
 skills add --skill <name> [--skill <name> …] --dest <path>
 skills add --all --dest <path>
+skills add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
 ```
 
 | Flag | Purpose | Required in non-interactive |
 |---|---|---|
-| `--skill <name>` | Install a specific skill (repeatable). Mutually exclusive with `--all`. | Yes, unless `--all` |
-| `--all` | Install every skill in the library. | Yes, unless `--skill` |
+| `--skill <name>` | Install a specific skill (repeatable). Mutually exclusive with `--all` and `--tag`. | Yes, unless `--all` or `--tag` |
+| `--all` | Install every skill in the library. Mutually exclusive with `--skill` and `--tag`. | Yes, unless `--skill` or `--tag` |
+| `--tag <tag>` | Install every skill carrying this tag (repeatable). Default semantics is union (any of the given tags). Mutually exclusive with `--skill` and `--all`. | Yes, unless `--skill` or `--all` |
+| `--all-tags` | Switch tag matching from union to intersection (skill must carry every requested tag). Requires `--tag`. | No |
 | `--dest <path>` | Project-relative destination folder (e.g. `.claude/skills`). The folder is created if missing. | **Yes** |
 | `--on-conflict <overwrite\|skip\|abort>` | Strategy when a destination skill folder already exists. | Yes if any conflict is encountered |
 
 Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, and an RFC3339 timestamp.
+
+Tags are read from the `SKILL.md` frontmatter as an inline YAML array:
+
+```yaml
+---
+name: claude-api
+description: Build and tune Claude API apps with prompt caching.
+tags: [api, claude, caching]
+---
+```
+
+Block-style YAML (multi-line lists) is not supported in v1; use inline arrays. A bare scalar `tags: foo` is accepted and treated as a single-tag list.
 
 ### `skills push` — propagate local edits back to the library
 
@@ -130,6 +152,24 @@ skills add --skill claude-api --skill review --dest .claude/skills
 
 ```sh
 skills add --all --dest .claude/skills --on-conflict skip
+```
+
+### Bulk-install every skill carrying a tag
+
+```sh
+skills add --tag api --dest .claude/skills
+```
+
+### Install only skills tagged with both `code-review` AND `gitlab`
+
+```sh
+skills add --tag code-review --tag gitlab --all-tags --dest .claude/skills
+```
+
+### List every skill tagged `meta`
+
+```sh
+skills list --tag meta
 ```
 
 ### Push every local edit, defaulting to skip on conflicts

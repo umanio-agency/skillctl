@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::{AddArgs, OnConflict};
-use crate::commands::shared::short_hint;
+use crate::commands::shared::{matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::fs_util;
@@ -166,9 +166,32 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
         }
         return Ok(chosen);
     }
+    if !args.tags.is_empty() {
+        let matched: Vec<Skill> = skills
+            .iter()
+            .filter(|s| matches_tags(&s.tags, &args.tags, args.all_tags))
+            .cloned()
+            .collect();
+        if matched.is_empty() {
+            return Err(anyhow!(
+                "no skills match the requested tag(s): {}",
+                args.tags.join(", ")
+            ));
+        }
+        if !ctx.interactive {
+            return Ok(matched);
+        }
+        // Interactive: tag pre-filters the multi-select; user still picks.
+        let mut prompt = multiselect("Skills to install (tag-filtered)").required(true);
+        for s in &matched {
+            let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+            prompt = prompt.item(s.clone(), &s.name, hint);
+        }
+        return Ok(prompt.interact()?);
+    }
     if !ctx.interactive {
         return Err(anyhow!(
-            "no skills selected — pass --skill <name> (repeatable) or --all"
+            "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all"
         ));
     }
     let mut prompt = multiselect("Skills to install").required(true);

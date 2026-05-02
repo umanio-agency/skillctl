@@ -42,17 +42,37 @@ pub struct InitArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct ListArgs {}
+pub struct ListArgs {
+    /// Show only skills carrying this tag. Repeatable; default semantics is
+    /// union (any of the given tags).
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Switch tag matching from union (any) to intersection (all) when
+    /// multiple `--tag` flags are passed. Has no effect without `--tag`.
+    #[arg(long, requires = "tags")]
+    pub all_tags: bool,
+}
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Skill name to install. Repeatable. Mutually exclusive with --all.
-    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    /// Skill name to install. Repeatable. Mutually exclusive with --all and --tag.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
 
     /// Install every skill from the library.
-    #[arg(long, conflicts_with = "skills")]
+    #[arg(long, conflicts_with_all = ["skills", "tags"])]
     pub all: bool,
+
+    /// Install every skill carrying this tag. Repeatable; default semantics is
+    /// union (any of the given tags). Mutually exclusive with --skill and --all.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["skills", "all"])]
+    pub tags: Vec<String>,
+
+    /// Switch tag matching from union (any) to intersection (all) when
+    /// multiple `--tag` flags are passed. Has no effect without `--tag`.
+    #[arg(long, requires = "tags")]
+    pub all_tags: bool,
 
     /// Install destination relative to the project root (e.g. `.claude/skills`).
     /// Required in non-interactive mode unless an existing destination is
