@@ -21,6 +21,7 @@ fn main() -> Result<()> {
         Command::List(args) => commands::list::run(args),
         Command::Add(args) => commands::add::run(args, &ctx),
         Command::Push(args) => commands::push::run(args, &ctx),
+        Command::Pull(args) => commands::pull::run(args, &ctx),
         Command::Detect(args) => commands::detect::run(args, &ctx),
     }
 }
