@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::DetectArgs;
-use crate::commands::shared::short_hint;
+use crate::commands::shared::{matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -227,9 +227,33 @@ fn select_new_skills(
         }
         return Ok(chosen);
     }
+    if !args.tags.is_empty() {
+        let matched: Vec<Skill> = new_skills
+            .iter()
+            .filter(|s| matches_tags(&s.tags, &args.tags, args.all_tags))
+            .cloned()
+            .collect();
+        if matched.is_empty() {
+            return Err(AppError::Config(format!(
+                "no detected skill matches the requested tag(s): {}",
+                args.tags.join(", ")
+            ))
+            .into());
+        }
+        if !ctx.interactive {
+            return Ok(matched);
+        }
+        let mut prompt =
+            multiselect("New skills to add to the library (tag-filtered)").required(true);
+        for s in &matched {
+            let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+            prompt = prompt.item(s.clone(), &s.name, hint);
+        }
+        return Ok(prompt.interact()?);
+    }
     if !ctx.interactive {
         return Err(AppError::Config(
-            "no skills selected — pass --skill <name> (repeatable) or --all".into(),
+            "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all".into(),
         )
         .into());
     }

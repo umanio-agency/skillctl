@@ -94,13 +94,24 @@ pub struct AddArgs {
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
-    /// Skill name to push. Repeatable. Mutually exclusive with --all.
-    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    /// Skill name to push. Repeatable. Mutually exclusive with --all and --tag.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
 
     /// Push every skill that has pushable changes (LocalChangesOnly + diverged + library-missing).
-    #[arg(long, conflicts_with = "skills")]
+    #[arg(long, conflicts_with_all = ["skills", "tags"])]
     pub all: bool,
+
+    /// Push every pushable skill carrying this tag. Repeatable; default
+    /// semantics is union (any of the given tags). Mutually exclusive with
+    /// --skill and --all. Tags are read from each skill's local SKILL.md.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["skills", "all"])]
+    pub tags: Vec<String>,
+
+    /// Switch tag matching from union (any) to intersection (all) when
+    /// multiple `--tag` flags are passed. Has no effect without `--tag`.
+    #[arg(long, requires = "tags")]
+    pub all_tags: bool,
 
     /// Resolution strategy for divergent skills (skip|overwrite). Fork is
     /// interactive-only in v1 — non-interactive runs fall back to skip when
@@ -115,13 +126,24 @@ pub struct PushArgs {
 
 #[derive(Args, Debug)]
 pub struct PullArgs {
-    /// Skill name to pull. Repeatable. Mutually exclusive with --all.
-    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    /// Skill name to pull. Repeatable. Mutually exclusive with --all and --tag.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
 
     /// Pull every skill that has library updates available (LibraryAhead + diverged).
-    #[arg(long, conflicts_with = "skills")]
+    #[arg(long, conflicts_with_all = ["skills", "tags"])]
     pub all: bool,
+
+    /// Pull every pullable skill carrying this tag. Repeatable; default
+    /// semantics is union (any of the given tags). Mutually exclusive with
+    /// --skill and --all. Tags are read from each skill's local SKILL.md.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["skills", "all"])]
+    pub tags: Vec<String>,
+
+    /// Switch tag matching from union (any) to intersection (all) when
+    /// multiple `--tag` flags are passed. Has no effect without `--tag`.
+    #[arg(long, requires = "tags")]
+    pub all_tags: bool,
 
     /// Resolution strategy for divergent skills (skip|overwrite). Fork-locally
     /// is interactive-only in v1 — non-interactive runs fall back to skip when
@@ -132,13 +154,24 @@ pub struct PullArgs {
 
 #[derive(Args, Debug)]
 pub struct DetectArgs {
-    /// Name of a new local skill to add. Repeatable. Mutually exclusive with --all.
-    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    /// Name of a new local skill to add. Repeatable. Mutually exclusive with --all and --tag.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
 
     /// Add every detected new skill.
-    #[arg(long, conflicts_with = "skills")]
+    #[arg(long, conflicts_with_all = ["skills", "tags"])]
     pub all: bool,
+
+    /// Add every newly detected skill carrying this tag. Repeatable; default
+    /// semantics is union (any of the given tags). Mutually exclusive with
+    /// --skill and --all.
+    #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["skills", "all"])]
+    pub tags: Vec<String>,
+
+    /// Switch tag matching from union (any) to intersection (all) when
+    /// multiple `--tag` flags are passed. Has no effect without `--tag`.
+    #[arg(long, requires = "tags")]
+    pub all_tags: bool,
 
     /// Target path inside the library (e.g. `skills` or `.claude/skills`).
     /// Required in non-interactive mode.

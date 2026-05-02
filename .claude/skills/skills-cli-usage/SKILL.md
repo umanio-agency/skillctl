@@ -94,7 +94,7 @@ skills add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
 
 Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, and an RFC3339 timestamp.
 
-Tags are read from the `SKILL.md` frontmatter as an inline YAML array:
+Tags are read from the `SKILL.md` frontmatter. Both inline and block forms work:
 
 ```yaml
 ---
@@ -104,19 +104,32 @@ tags: [api, claude, caching]
 ---
 ```
 
-Block-style YAML (multi-line lists) is not supported in v1; use inline arrays. A bare scalar `tags: foo` is accepted and treated as a single-tag list.
+```yaml
+---
+name: claude-api
+tags:
+  - api
+  - claude
+  - caching
+---
+```
+
+A bare scalar `tags: foo` is accepted and treated as a single-tag list. Tag flags on `push` and `pull` read tags from each skill's **local** SKILL.md (the user's current view), so retagging locally takes effect on the next run without needing to push or pull first.
 
 ### `skills push` — propagate local edits back to the library
 
 ```sh
 skills push --skill <name> [--skill <name> …]
 skills push --all
+skills push --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
 | Flag | Purpose |
 |---|---|
-| `--skill <name>` | Push only specific skills by name (repeatable). |
-| `--all` | Push every skill that has pushable changes. |
+| `--skill <name>` | Push only specific skills by name (repeatable). Mutually exclusive with `--all`/`--tag`. |
+| `--all` | Push every skill that has pushable changes. Mutually exclusive with `--skill`/`--tag`. |
+| `--tag <tag>` | Push every pushable skill whose **local** SKILL.md carries this tag. Repeatable; default semantics is union (any of). Mutually exclusive with `--skill`/`--all`. |
+| `--all-tags` | Switch tag matching to intersection (skill must carry every requested tag). Requires `--tag`. |
 | `--on-divergence <overwrite\|skip>` | Strategy for skills that changed both locally **and** in the library since install. Default behaviour when omitted: skip with a warning. |
 | `--message <text>` | Override the auto-generated commit message. |
 
@@ -129,12 +142,15 @@ For each pushable skill, `skills push` runs a content diff (via git blob hashes)
 ```sh
 skills pull --skill <name> [--skill <name> …]
 skills pull --all
+skills pull --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
 | Flag | Purpose |
 |---|---|
-| `--skill <name>` | Pull only specific skills by name (repeatable). |
-| `--all` | Pull every skill that has library updates available. |
+| `--skill <name>` | Pull only specific skills by name (repeatable). Mutually exclusive with `--all`/`--tag`. |
+| `--all` | Pull every skill that has library updates available. Mutually exclusive with `--skill`/`--tag`. |
+| `--tag <tag>` | Pull every pullable skill whose **local** SKILL.md carries this tag. Repeatable; default semantics is union. Mutually exclusive with `--skill`/`--all`. |
+| `--all-tags` | Switch tag matching to intersection. Requires `--tag`. |
 | `--on-divergence <overwrite\|skip>` | Strategy for skills that changed both locally **and** in the library since install. Default behaviour when omitted: skip with a warning. |
 
 For each pullable skill, `skills pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow.
@@ -146,12 +162,15 @@ For each pullable skill, `skills pull` runs the same blob-SHA classification as 
 ```sh
 skills detect --skill <name> [--skill <name> …] --target <library-path>
 skills detect --all --target <library-path>
+skills detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-path>
 ```
 
 | Flag | Purpose | Required in non-interactive |
 |---|---|---|
-| `--skill <name>` | Add a specific detected skill by name (repeatable). | Yes, unless `--all` |
-| `--all` | Add every detected new skill. | Yes, unless `--skill` |
+| `--skill <name>` | Add a specific detected skill by name (repeatable). Mutually exclusive with `--all`/`--tag`. | Yes, unless `--all` or `--tag` |
+| `--all` | Add every detected new skill. Mutually exclusive with `--skill`/`--tag`. | Yes, unless `--skill` or `--tag` |
+| `--tag <tag>` | Add every newly detected skill carrying this tag (repeatable). Default semantics is union. Mutually exclusive with `--skill`/`--all`. | Yes, unless `--skill` or `--all` |
+| `--all-tags` | Switch tag matching to intersection. Requires `--tag`. | No |
 | `--target <path>` | Library-relative folder where the new skills should land (e.g. `skills` or `.claude/skills`). | **Yes** |
 
 `skills detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.

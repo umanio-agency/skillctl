@@ -9,12 +9,14 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::cli::{OnDivergence, PushArgs};
 use crate::commands::diff::{SkillStatus, classify};
+use crate::commands::shared::matches_tags;
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::project_config::{self, InstalledSkill};
+use crate::skill;
 use crate::ui;
 
 #[derive(Clone, Debug)]
@@ -23,6 +25,7 @@ struct Candidate {
     name: String,
     destination: PathBuf,
     status: SkillStatus,
+    tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -98,11 +101,14 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     let mut candidates = Vec::new();
     for (index, installed) in project_cfg.installed.iter().enumerate() {
         let status = classify(installed, &cwd, &library_root)?;
+        let tags = skill::read_tags(&cwd.join(&installed.destination).join("SKILL.md"))
+            .unwrap_or_default();
         candidates.push(Candidate {
             index,
             name: installed.name.clone(),
             destination: installed.destination.clone(),
             status,
+            tags,
         });
     }
 
@@ -461,9 +467,31 @@ fn select_pushable(
         }
         return Ok(chosen);
     }
+    if !args.tags.is_empty() {
+        let matched: Vec<&&Candidate> = pushable
+            .iter()
+            .filter(|c| matches_tags(&c.tags, &args.tags, args.all_tags))
+            .collect();
+        if matched.is_empty() {
+            return Err(AppError::Config(format!(
+                "no pushable skill matches the requested tag(s): {}",
+                args.tags.join(", ")
+            ))
+            .into());
+        }
+        if !ctx.interactive {
+            return Ok(matched.iter().map(|c| c.index).collect());
+        }
+        let mut prompt = multiselect("Skills to push (tag-filtered)").required(true);
+        for c in &matched {
+            let hint = describe(&c.status);
+            prompt = prompt.item(c.index, &c.name, hint);
+        }
+        return Ok(prompt.interact()?);
+    }
     if !ctx.interactive {
         return Err(AppError::Config(
-            "no skills selected — pass --skill <name> (repeatable) or --all".into(),
+            "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all".into(),
         )
         .into());
     }
