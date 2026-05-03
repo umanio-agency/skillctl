@@ -113,11 +113,17 @@ pub struct PushArgs {
     #[arg(long, requires = "tags")]
     pub all_tags: bool,
 
-    /// Resolution strategy for divergent skills (skip|overwrite). Fork is
-    /// interactive-only in v1 — non-interactive runs fall back to skip when
-    /// this flag is omitted.
+    /// Resolution strategy for divergent (and library-missing) skills:
+    /// `skip` / `overwrite` / `fork`. `fork` requires `--fork-suffix` in
+    /// non-interactive mode.
     #[arg(long, value_enum, value_name = "POLICY")]
     pub on_divergence: Option<OnDivergence>,
+
+    /// Suffix appended to the original skill name when forking
+    /// non-interactively (e.g. `--fork-suffix custom` → `<name>-custom`).
+    /// Required when `--on-divergence fork` is used without a TTY.
+    #[arg(long, value_name = "SUFFIX")]
+    pub fork_suffix: Option<String>,
 
     /// Override the auto-generated commit message.
     #[arg(long, value_name = "MESSAGE")]
@@ -145,11 +151,18 @@ pub struct PullArgs {
     #[arg(long, requires = "tags")]
     pub all_tags: bool,
 
-    /// Resolution strategy for divergent skills (skip|overwrite). Fork-locally
-    /// is interactive-only in v1 — non-interactive runs fall back to skip when
-    /// this flag is omitted.
+    /// Resolution strategy for divergent skills: `skip` / `overwrite` /
+    /// `fork`. `fork` here means **fork-locally**: rename the existing local
+    /// folder under a new name, then pull the library version into the
+    /// original destination. Requires `--fork-suffix` in non-interactive mode.
     #[arg(long, value_enum, value_name = "POLICY")]
     pub on_divergence: Option<OnDivergence>,
+
+    /// Suffix appended to the original skill name when fork-locally is used
+    /// non-interactively (e.g. `--fork-suffix local` → `<name>-local`).
+    /// Required when `--on-divergence fork` is used without a TTY.
+    #[arg(long, value_name = "SUFFIX")]
+    pub fork_suffix: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -191,8 +204,14 @@ pub enum OnConflict {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum OnDivergence {
-    /// Force the local version onto the library, discarding upstream changes.
+    /// Force the local version onto the library (push), or pull the library
+    /// version into the local destination (pull) — discarding the other side.
     Overwrite,
     /// Leave the divergent skill untouched on both sides.
     Skip,
+    /// Fork the divergent skill. On `push`, create a new library skill from
+    /// the local content. On `pull`, rename the local copy under a new name
+    /// and pull the library version into the original destination. Requires
+    /// `--fork-suffix` in non-interactive mode.
+    Fork,
 }

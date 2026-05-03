@@ -79,8 +79,10 @@ pub fn find_skills_folders(root: &Path) -> Result<Vec<PathBuf>> {
 
 /// Extract `name`, `description`, and `tags` from a leading YAML-style
 /// frontmatter block. Tolerant by design — single-line values are parsed,
-/// `tags:` accepts both the inline array form (`[a, b, c]`) and the block
-/// form (subsequent indented `- item` lines), and any other key is ignored.
+/// `description:` accepts both inline values and YAML block scalars (`|`
+/// literal, `>` folded), `tags:` accepts both the inline array form
+/// (`[a, b, c]`) and the block form (subsequent indented `- item` lines),
+/// and any other key is ignored.
 fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>) {
     let mut lines = raw.lines().peekable();
     if lines.next().map(str::trim) != Some("---") {
@@ -96,7 +98,40 @@ fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>)
         if let Some(rest) = line.strip_prefix("name:") {
             name = Some(clean_value(rest));
         } else if let Some(rest) = line.strip_prefix("description:") {
-            description = Some(clean_value(rest));
+            let trimmed = rest.trim();
+            if trimmed == "|" || trimmed == ">" {
+                let folded = trimmed == ">";
+                let mut parts: Vec<String> = Vec::new();
+                while let Some(peek) = lines.peek() {
+                    if peek.trim() == "---" {
+                        break;
+                    }
+                    if peek.starts_with(' ') || peek.starts_with('\t') {
+                        parts.push(peek.trim().to_string());
+                        lines.next();
+                    } else if peek.trim().is_empty() {
+                        parts.push(String::new());
+                        lines.next();
+                    } else {
+                        break;
+                    }
+                }
+                let joined = if folded {
+                    parts
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    parts.join("\n").trim_end().to_string()
+                };
+                description = Some(joined);
+            } else {
+                description = Some(clean_value(trimmed));
+            }
         } else if let Some(rest) = line.strip_prefix("tags:") {
             let trimmed = rest.trim();
             if trimmed.is_empty() {
@@ -254,5 +289,27 @@ mod tests {
         let raw = "---\ntags:\nname: solo\n---\n";
         let (_, _, tags) = parse_frontmatter(raw);
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn parses_literal_multiline_description() {
+        let raw = "---\nname: foo\ndescription: |\n  first line\n  second line\n---\n";
+        let (_, desc, _) = parse_frontmatter(raw);
+        assert_eq!(desc.as_deref(), Some("first line\nsecond line"));
+    }
+
+    #[test]
+    fn parses_folded_multiline_description() {
+        let raw = "---\ndescription: >\n  first line\n  second line\n---\n";
+        let (_, desc, _) = parse_frontmatter(raw);
+        assert_eq!(desc.as_deref(), Some("first line second line"));
+    }
+
+    #[test]
+    fn multiline_description_followed_by_tags() {
+        let raw = "---\ndescription: |\n  body line 1\n  body line 2\ntags: [x, y]\n---\n";
+        let (_, desc, tags) = parse_frontmatter(raw);
+        assert_eq!(desc.as_deref(), Some("body line 1\nbody line 2"));
+        assert_eq!(tags, vec!["x".to_string(), "y".to_string()]);
     }
 }

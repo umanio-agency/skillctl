@@ -40,6 +40,7 @@ impl From<OnDivergence> for DivergenceChoice {
         match v {
             OnDivergence::Overwrite => Self::Overwrite,
             OnDivergence::Skip => Self::Skip,
+            OnDivergence::Fork => Self::Fork,
         }
     }
 }
@@ -66,6 +67,16 @@ enum ApplyOp {
 
 pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skills push")?;
+
+    if matches!(args.on_divergence, Some(OnDivergence::Fork))
+        && !ctx.interactive
+        && args.fork_suffix.is_none()
+    {
+        return Err(AppError::Config(
+            "--on-divergence fork requires --fork-suffix in non-interactive mode".into(),
+        )
+        .into());
+    }
 
     let cfg = config::load()?;
     let library = cfg.library.ok_or_else(|| {
@@ -209,7 +220,12 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 };
                 match choice {
                     DivergenceChoice::Overwrite => Some(ApplyOp::Update),
-                    DivergenceChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
+                    DivergenceChoice::Fork => Some(resolve_fork_op(
+                        ctx,
+                        installed,
+                        &library_root,
+                        args.fork_suffix.as_deref(),
+                    )?),
                     DivergenceChoice::Skip => {
                         ui::log_info(ctx, format!("skipped {}", candidate.name))?;
                         results.push(json!({
@@ -225,9 +241,10 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 let choice = if let Some(policy) = args.on_divergence {
                     match policy {
                         OnDivergence::Skip => LibMissingChoice::Skip,
+                        OnDivergence::Fork => LibMissingChoice::Fork,
                         OnDivergence::Overwrite => {
                             ui::log_warning(ctx, format!(
-                                "{} is removed from the library; --on-divergence overwrite cannot apply (use the interactive flow for fork)",
+                                "{} is removed from the library; --on-divergence overwrite cannot apply (only fork or skip)",
                                 candidate.name
                             ))?;
                             LibMissingChoice::Skip
@@ -260,7 +277,12 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     .interact()?
                 };
                 match choice {
-                    LibMissingChoice::Fork => Some(prompt_fork_op(installed, &library_root)?),
+                    LibMissingChoice::Fork => Some(resolve_fork_op(
+                        ctx,
+                        installed,
+                        &library_root,
+                        args.fork_suffix.as_deref(),
+                    )?),
                     LibMissingChoice::Skip => {
                         ui::log_info(ctx, format!("skipped {}", candidate.name))?;
                         results.push(json!({
@@ -503,31 +525,55 @@ fn select_pushable(
     Ok(prompt.interact()?)
 }
 
-fn prompt_fork_op(installed: &InstalledSkill, library_root: &Path) -> Result<ApplyOp> {
-    let raw_name: String = input("New skill name")
-        .placeholder("foo-custom")
-        .validate(|s: &String| {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return Err("name cannot be empty");
-            }
-            if trimmed.contains('/') || trimmed.contains('\\') {
-                return Err("name cannot contain `/` or `\\`");
-            }
-            Ok(())
-        })
-        .interact()?;
-    let new_name = raw_name.trim().to_string();
+fn resolve_fork_op(
+    ctx: &Context,
+    installed: &InstalledSkill,
+    library_root: &Path,
+    fork_suffix: Option<&str>,
+) -> Result<ApplyOp> {
+    let new_name = if ctx.interactive {
+        let raw_name: String = input("New skill name")
+            .placeholder("foo-custom")
+            .validate(|s: &String| validate_fork_name(s.trim()))
+            .interact()?;
+        raw_name.trim().to_string()
+    } else {
+        let suffix = fork_suffix.ok_or_else(|| {
+            AppError::Config(
+                "fork requires --fork-suffix in non-interactive mode".into(),
+            )
+        })?;
+        let candidate = format!("{}-{}", installed.name, suffix.trim());
+        validate_fork_name(&candidate).map_err(|e| AppError::Config(e.to_string()))?;
+        candidate
+    };
+    fork_op_for_name(installed, library_root, &new_name)
+}
 
+fn validate_fork_name(name: &str) -> std::result::Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("name cannot be empty");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("name cannot contain `/` or `\\`");
+    }
+    Ok(())
+}
+
+fn fork_op_for_name(
+    installed: &InstalledSkill,
+    library_root: &Path,
+    new_name: &str,
+) -> Result<ApplyOp> {
     let library_parent = installed
         .source_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(""));
     let new_library_path = if library_parent.as_os_str().is_empty() {
-        PathBuf::from(&new_name)
+        PathBuf::from(new_name)
     } else {
-        library_parent.join(&new_name)
+        library_parent.join(new_name)
     };
 
     if library_root.join(&new_library_path).exists() {
@@ -544,13 +590,13 @@ fn prompt_fork_op(installed: &InstalledSkill, library_root: &Path) -> Result<App
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(""));
     let new_local_destination = if local_parent.as_os_str().is_empty() {
-        PathBuf::from(&new_name)
+        PathBuf::from(new_name)
     } else {
-        local_parent.join(&new_name)
+        local_parent.join(new_name)
     };
 
     Ok(ApplyOp::Fork {
-        new_name,
+        new_name: new_name.to_string(),
         new_library_path,
         new_local_destination,
     })
