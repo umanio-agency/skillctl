@@ -116,6 +116,19 @@ tags:
 
 A bare scalar `tags: foo` is accepted and treated as a single-tag list. Tag flags on `push` and `pull` read tags from each skill's **local** SKILL.md (the user's current view), so retagging locally takes effect on the next run without needing to push or pull first.
 
+`description:` accepts both a single-line value and YAML block scalars:
+
+```yaml
+description: |
+  Multi-line literal description.
+  Newlines are preserved.
+
+description: >
+  Multi-line folded description that
+  joins lines with spaces, useful for
+  one long sentence wrapped in source.
+```
+
 ### `skills push` — propagate local edits back to the library
 
 ```sh
@@ -130,12 +143,13 @@ skills push --tag <tag> [--tag <tag> …] [--all-tags]
 | `--all` | Push every skill that has pushable changes. Mutually exclusive with `--skill`/`--tag`. |
 | `--tag <tag>` | Push every pushable skill whose **local** SKILL.md carries this tag. Repeatable; default semantics is union (any of). Mutually exclusive with `--skill`/`--all`. |
 | `--all-tags` | Switch tag matching to intersection (skill must carry every requested tag). Requires `--tag`. |
-| `--on-divergence <overwrite\|skip>` | Strategy for skills that changed both locally **and** in the library since install. Default behaviour when omitted: skip with a warning. |
+| `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent (and library-missing) skills. Default when omitted: skip with a warning. |
+| `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New name = `<original>-<suffix>`. |
 | `--message <text>` | Override the auto-generated commit message. |
 
 For each pushable skill, `skills push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits **once** for the whole run and pushes to the library remote. The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to the new HEAD.
 
-**Fork** (creating a new library skill from local edits) is interactive-only in v1. In non-interactive mode, divergent skills are skipped if `--on-divergence` isn't `overwrite`.
+**Fork** (creating a new library skill from local edits) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: every divergent (or library-missing) skill is forked under the name `<original>-<suffix>`.
 
 ### `skills pull` — refresh installed skills from the library
 
@@ -151,11 +165,12 @@ skills pull --tag <tag> [--tag <tag> …] [--all-tags]
 | `--all` | Pull every skill that has library updates available. Mutually exclusive with `--skill`/`--tag`. |
 | `--tag <tag>` | Pull every pullable skill whose **local** SKILL.md carries this tag. Repeatable; default semantics is union. Mutually exclusive with `--skill`/`--all`. |
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. |
-| `--on-divergence <overwrite\|skip>` | Strategy for skills that changed both locally **and** in the library since install. Default behaviour when omitted: skip with a warning. |
+| `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent skills. `fork` here means **fork-locally** (rename the local copy under a new name, then pull the library version into the original destination). Default when omitted: skip. |
+| `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New local name = `<original>-<suffix>`. |
 
 For each pullable skill, `skills pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow.
 
-**Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is interactive-only in v1. In non-interactive mode, divergent skills are skipped if `--on-divergence` isn't `overwrite`.
+**Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: each divergent skill's local folder is renamed to `<original>-<suffix>`, then the library version drops into the original destination.
 
 ### `skills detect` — find new local skills and add them to the library
 
@@ -240,6 +255,12 @@ skills push --all
 skills push --all --on-divergence overwrite
 ```
 
+### Fork every diverged skill under a `<name>-custom` library entry
+
+```sh
+skills push --all --on-divergence fork --fork-suffix custom
+```
+
 ### Pull every available library update
 
 ```sh
@@ -250,6 +271,12 @@ skills pull --all
 
 ```sh
 skills pull --all --on-divergence overwrite
+```
+
+### Pull updates while keeping your local edits as `<name>-local`
+
+```sh
+skills pull --all --on-divergence fork --fork-suffix local
 ```
 
 ### Contribute every new local skill back to the library
@@ -276,5 +303,4 @@ skills push --skill review --skill security-review --message "polish: tighter re
 
 - `skills` does not handle merges. When local and library both moved past the recorded `source_sha`, the operator chooses one side; there is no automatic three-way merge.
 - `skills push` always produces **one commit per run**, regardless of how many skills are touched.
-- Forking a divergent skill into a new library skill is currently **interactive-only**. To do it from an agent, ask the user.
-- Forking *locally* during `pull` (preserving local edits under a new name) is also interactive-only.
+- Forking is now supported non-interactively via `--on-divergence fork --fork-suffix <s>` — the suffix is appended to each forked skill's name. Without `--fork-suffix`, fork stays interactive (each fork prompts for a name).

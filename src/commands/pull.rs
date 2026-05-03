@@ -42,6 +42,7 @@ impl From<OnDivergence> for DivergenceChoice {
         match v {
             OnDivergence::Overwrite => Self::Overwrite,
             OnDivergence::Skip => Self::Skip,
+            OnDivergence::Fork => Self::ForkLocal,
         }
     }
 }
@@ -58,6 +59,16 @@ enum ApplyOp {
 
 pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skills pull")?;
+
+    if matches!(args.on_divergence, Some(OnDivergence::Fork))
+        && !ctx.interactive
+        && args.fork_suffix.is_none()
+    {
+        return Err(AppError::Config(
+            "--on-divergence fork requires --fork-suffix in non-interactive mode".into(),
+        )
+        .into());
+    }
 
     let cfg = config::load()?;
     let library = cfg.library.ok_or_else(|| {
@@ -209,7 +220,12 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                 };
                 match choice {
                     DivergenceChoice::Overwrite => Some(ApplyOp::Pull),
-                    DivergenceChoice::ForkLocal => Some(prompt_local_fork_op(installed, &cwd)?),
+                    DivergenceChoice::ForkLocal => Some(resolve_local_fork_op(
+                        ctx,
+                        installed,
+                        &cwd,
+                        args.fork_suffix.as_deref(),
+                    )?),
                     DivergenceChoice::Skip => {
                         ui::log_info(ctx, format!("skipped {}", candidate.name))?;
                         results.push(json!({
@@ -404,22 +420,29 @@ fn select_pullable(args: &PullArgs, ctx: &Context, pullable: &[&Candidate]) -> R
     Ok(prompt.interact()?)
 }
 
-fn prompt_local_fork_op(installed: &InstalledSkill, cwd: &Path) -> Result<ApplyOp> {
-    let placeholder = format!("{}-local", installed.name);
-    let raw_name: String = input("Local fork name")
-        .placeholder(&placeholder)
-        .validate(|s: &String| {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return Err("name cannot be empty");
-            }
-            if trimmed.contains('/') || trimmed.contains('\\') {
-                return Err("name cannot contain `/` or `\\`");
-            }
-            Ok(())
-        })
-        .interact()?;
-    let new_name = raw_name.trim().to_string();
+fn resolve_local_fork_op(
+    ctx: &Context,
+    installed: &InstalledSkill,
+    cwd: &Path,
+    fork_suffix: Option<&str>,
+) -> Result<ApplyOp> {
+    let new_name = if ctx.interactive {
+        let placeholder = format!("{}-local", installed.name);
+        let raw_name: String = input("Local fork name")
+            .placeholder(&placeholder)
+            .validate(|s: &String| validate_fork_name(s.trim()))
+            .interact()?;
+        raw_name.trim().to_string()
+    } else {
+        let suffix = fork_suffix.ok_or_else(|| {
+            AppError::Config(
+                "fork-locally requires --fork-suffix in non-interactive mode".into(),
+            )
+        })?;
+        let candidate = format!("{}-{}", installed.name, suffix.trim());
+        validate_fork_name(&candidate).map_err(|e| AppError::Config(e.to_string()))?;
+        candidate
+    };
 
     let fork_dest = local_fork_destination(installed, cwd, &new_name);
     if fork_dest.exists() {
@@ -433,6 +456,16 @@ fn prompt_local_fork_op(installed: &InstalledSkill, cwd: &Path) -> Result<ApplyO
     Ok(ApplyOp::ForkLocal {
         local_fork_name: new_name,
     })
+}
+
+fn validate_fork_name(name: &str) -> std::result::Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("name cannot be empty");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("name cannot contain `/` or `\\`");
+    }
+    Ok(())
 }
 
 fn local_fork_destination(installed: &InstalledSkill, cwd: &Path, name: &str) -> PathBuf {
