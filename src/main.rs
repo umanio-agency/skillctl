@@ -6,6 +6,7 @@ mod error;
 mod fs_util;
 mod git;
 mod project_config;
+mod prompt;
 mod skill;
 mod ui;
 

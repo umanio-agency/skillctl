@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
-use cliclack::{input, multiselect, select};
+use cliclack::{input, select};
+
+use crate::prompt::multiselect;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -509,7 +511,7 @@ fn select_pushable(
             let hint = describe(&c.status);
             prompt = prompt.item(c.index, &c.name, hint);
         }
-        return Ok(prompt.interact()?);
+        return prompt.interact();
     }
     if !ctx.interactive {
         return Err(AppError::Config(
@@ -522,7 +524,7 @@ fn select_pushable(
         let hint = describe(&c.status);
         prompt = prompt.item(c.index, &c.name, hint);
     }
-    Ok(prompt.interact()?)
+    prompt.interact()
 }
 
 fn resolve_fork_op(
