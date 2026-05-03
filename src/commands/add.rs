@@ -23,10 +23,7 @@ use crate::ui;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum DestChoice {
     Existing(PathBuf),
-    Preset {
-        label: &'static str,
-        path: PathBuf,
-    },
+    Preset { label: &'static str, path: PathBuf },
     Custom,
 }
 
@@ -55,8 +52,8 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
         AppError::Config("no library configured — run `skills init <github-url>` first".into())
     })?;
 
-    let library_root = config::library_cache_path(&library.url)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let library_root =
+        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
@@ -91,8 +88,7 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     let dest_root = resolve_destination(&args, ctx, &cwd)?;
     let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
 
-    let source_sha =
-        git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
+    let source_sha = git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .context("formatting installation timestamp")?;
@@ -182,7 +178,10 @@ fn emit_json(ctx: &Context, destination: Option<&PathBuf>, results: &[Value]) {
     if !ctx.json {
         return;
     }
-    let installed = results.iter().filter(|r| r["status"] == "installed").count();
+    let installed = results
+        .iter()
+        .filter(|r| r["status"] == "installed")
+        .count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
     let aborted = results.iter().filter(|r| r["status"] == "aborted").count();
     let out = json!({
@@ -199,7 +198,10 @@ fn emit_json(ctx: &Context, destination: Option<&PathBuf>, results: &[Value]) {
 }
 
 fn summary_text(results: &[Value]) -> String {
-    let installed = results.iter().filter(|r| r["status"] == "installed").count();
+    let installed = results
+        .iter()
+        .filter(|r| r["status"] == "installed")
+        .count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
     let aborted = results.iter().filter(|r| r["status"] == "aborted").count();
     if aborted > 0 {
@@ -250,8 +252,7 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
     }
     if !ctx.interactive {
         return Err(AppError::Config(
-            "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all"
-                .into(),
+            "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all".into(),
         )
         .into());
     }
@@ -268,10 +269,7 @@ fn resolve_destination(args: &AddArgs, ctx: &Context, cwd: &std::path::Path) -> 
         return Ok(dest.clone());
     }
     if !ctx.interactive {
-        return Err(AppError::Config(
-            "no install destination — pass --dest <path>".into(),
-        )
-        .into());
+        return Err(AppError::Config("no install destination — pass --dest <path>".into()).into());
     }
     let existing = skill::find_skills_folders(cwd)?
         .into_iter()

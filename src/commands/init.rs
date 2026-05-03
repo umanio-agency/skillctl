@@ -15,8 +15,7 @@ pub fn run(args: InitArgs, ctx: &Context) -> Result<()> {
     git::ensure_available().map_err(|e| AppError::Git(e.to_string()))?;
 
     let url = args.url;
-    let dest = config::library_cache_path(&url)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let dest = config::library_cache_path(&url).map_err(|e| AppError::Config(e.to_string()))?;
 
     if dest.exists() {
         fs::remove_dir_all(&dest)
@@ -27,10 +26,7 @@ pub fn run(args: InitArgs, ctx: &Context) -> Result<()> {
             .with_context(|| format!("creating cache dir at {}", parent.display()))?;
     }
 
-    ui::log_info(
-        ctx,
-        format!("cloning {url} into {} ...", dest.display()),
-    )?;
+    ui::log_info(ctx, format!("cloning {url} into {} ...", dest.display()))?;
     git::clone(&url, &dest).map_err(|e| AppError::Git(e.to_string()))?;
 
     let config = Config {

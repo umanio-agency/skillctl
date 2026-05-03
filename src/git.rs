@@ -63,11 +63,7 @@ pub fn head_sha(repo: &Path) -> Result<String> {
 /// List the blob SHAs of every file under `path` at `refspec`, keyed by their
 /// repo-relative path. Returns an empty map if the path does not exist at that
 /// ref (a missing-from-library signal).
-pub fn ls_tree_blobs(
-    repo: &Path,
-    refspec: &str,
-    path: &Path,
-) -> Result<HashMap<PathBuf, String>> {
+pub fn ls_tree_blobs(repo: &Path, refspec: &str, path: &Path) -> Result<HashMap<PathBuf, String>> {
     let output = Command::new("git")
         .current_dir(repo)
         .args(["ls-tree", "-r", "-z", refspec, "--"])
@@ -87,8 +83,7 @@ pub fn ls_tree_blobs(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let raw = String::from_utf8(output.stdout)
-        .context("`git ls-tree` returned non-UTF8 output")?;
+    let raw = String::from_utf8(output.stdout).context("`git ls-tree` returned non-UTF8 output")?;
     let mut map = HashMap::new();
     for entry in raw.split('\0') {
         if entry.is_empty() {
@@ -123,8 +118,8 @@ pub fn hash_object(file: &Path) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let sha = String::from_utf8(output.stdout)
-        .context("`git hash-object` returned non-UTF8 output")?;
+    let sha =
+        String::from_utf8(output.stdout).context("`git hash-object` returned non-UTF8 output")?;
     Ok(sha.trim().to_string())
 }
 
@@ -157,12 +152,7 @@ pub fn has_staged_changes(repo: &Path) -> Result<bool> {
         .current_dir(repo)
         .args(["diff", "--cached", "--quiet"])
         .status()
-        .with_context(|| {
-            format!(
-                "invoking `git diff --cached --quiet` in {}",
-                repo.display()
-            )
-        })?;
+        .with_context(|| format!("invoking `git diff --cached --quiet` in {}", repo.display()))?;
     match status.code() {
         Some(0) => Ok(false),
         Some(1) => Ok(true),

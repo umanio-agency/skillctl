@@ -11,14 +11,12 @@ use crate::skill;
 
 pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
     let cfg = config::load()?;
-    let library = cfg
-        .library
-        .ok_or_else(|| AppError::Config(
-            "no library configured — run `skills init <github-url>` first".into(),
-        ))?;
+    let library = cfg.library.ok_or_else(|| {
+        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+    })?;
 
-    let repo = config::library_cache_path(&library.url)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let repo =
+        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !repo.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",

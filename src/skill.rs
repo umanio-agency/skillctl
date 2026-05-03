@@ -172,7 +172,9 @@ pub fn read_tags(skill_md: &Path) -> Result<Vec<String>> {
 }
 
 fn clean_value(raw: &str) -> String {
-    raw.trim().trim_matches(|c| c == '"' || c == '\'').to_string()
+    raw.trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_string()
 }
 
 /// Parse the inline-array tag form: `[a, b, "c"]`. Empty input or `[]` returns
@@ -231,7 +233,10 @@ mod tests {
     fn parses_inline_tag_array() {
         let raw = "---\nname: foo\ntags: [a, b, c]\n---\n";
         let (_, _, tags) = parse_frontmatter(raw);
-        assert_eq!(tags, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            tags,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
@@ -266,7 +271,10 @@ mod tests {
     fn parses_block_tag_form() {
         let raw = "---\nname: foo\ntags:\n  - a\n  - b\n  - c\n---\n";
         let (_, _, tags) = parse_frontmatter(raw);
-        assert_eq!(tags, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            tags,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]

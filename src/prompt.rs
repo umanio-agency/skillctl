@@ -64,12 +64,7 @@ impl<T: Clone> FilterMultiSelect<T> {
         self
     }
 
-    pub fn item(
-        mut self,
-        value: T,
-        label: impl Into<String>,
-        hint: impl Into<String>,
-    ) -> Self {
+    pub fn item(mut self, value: T, label: impl Into<String>, hint: impl Into<String>) -> Self {
         self.items.push(PromptItem {
             value,
             label: label.into(),
@@ -170,14 +165,22 @@ impl From<anyhow::Error> for LoopError {
     }
 }
 
-fn run_event_loop<T: Clone>(state: &mut State<T>, out: &mut Stdout) -> std::result::Result<(), LoopError> {
+fn run_event_loop<T: Clone>(
+    state: &mut State<T>,
+    out: &mut Stdout,
+) -> std::result::Result<(), LoopError> {
     loop {
         clear_render(out, state.last_lines).map_err(LoopError::from)?;
         let lines = render(out, state).map_err(LoopError::from)?;
         state.last_lines = lines;
-        out.flush().context("flushing terminal").map_err(LoopError::from)?;
+        out.flush()
+            .context("flushing terminal")
+            .map_err(LoopError::from)?;
 
-        match event::read().context("reading terminal event").map_err(LoopError::from)? {
+        match event::read()
+            .context("reading terminal event")
+            .map_err(LoopError::from)?
+        {
             Event::Key(KeyEvent {
                 code,
                 modifiers,
@@ -303,18 +306,40 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
             let is_selected = state.selected.contains(&item_idx);
             let item = &state.items[item_idx];
 
-            queue!(out, SetForegroundColor(COLOR_DIM), Print(MARK_BAR), ResetColor, Print("  "))?;
+            queue!(
+                out,
+                SetForegroundColor(COLOR_DIM),
+                Print(MARK_BAR),
+                ResetColor,
+                Print("  ")
+            )?;
 
             if is_focused {
-                queue!(out, SetForegroundColor(COLOR_ACCENT), Print(MARK_FOCUS), ResetColor, Print(" "))?;
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_ACCENT),
+                    Print(MARK_FOCUS),
+                    ResetColor,
+                    Print(" ")
+                )?;
             } else {
                 queue!(out, Print("  "))?;
             }
 
             if is_selected {
-                queue!(out, SetForegroundColor(COLOR_SELECTED), Print(MARK_SELECTED), ResetColor)?;
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_SELECTED),
+                    Print(MARK_SELECTED),
+                    ResetColor
+                )?;
             } else {
-                queue!(out, SetForegroundColor(COLOR_DIM), Print(MARK_UNSELECTED), ResetColor)?;
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_DIM),
+                    Print(MARK_UNSELECTED),
+                    ResetColor
+                )?;
             }
             queue!(out, Print(" "))?;
 
