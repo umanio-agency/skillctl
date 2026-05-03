@@ -210,6 +210,21 @@ Agents should branch on exit code first, then optionally inspect stderr for cont
 
 Errors always go to stderr regardless of mode.
 
+## Interactive prompt (multi-select with live filter)
+
+When a multi-select prompt opens (in `add`, `push`, `pull`, `detect` without flags or `--all` and a TTY), the prompt has a live filter:
+
+- **Type any character** — appends to the filter; the list filters in real time on the skill name (substring, case-insensitive).
+- **Backspace** — edits the filter.
+- **↑ / ↓** — navigates the filtered list.
+- **Space** or **Tab** — toggles selection on the focused item.
+- **Enter** — confirms the prompt with all currently-selected items.
+- **Esc** or **Ctrl+C** — cancels.
+
+The filter searches skill names only (so Space stays available as a toggle). The hint/description column is shown next to each row but not searched. A windowed view shows up to ~12 items at a time with `↑ N more above` / `↓ N more below` indicators when needed.
+
+Agents driving the CLI never see this prompt — `--json` and non-TTY contexts suppress all interactive UI.
+
 ## Recipes
 
 ### Install a fresh project's skills

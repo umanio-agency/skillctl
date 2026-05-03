@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use cliclack::{input, multiselect, select};
+use cliclack::{input, select};
+
+use crate::prompt::multiselect;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -244,7 +246,7 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
             let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
             prompt = prompt.item(s.clone(), &s.name, hint);
         }
-        return Ok(prompt.interact()?);
+        return prompt.interact();
     }
     if !ctx.interactive {
         return Err(AppError::Config(
@@ -258,7 +260,7 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
         let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
         prompt = prompt.item(s.clone(), &s.name, hint);
     }
-    Ok(prompt.interact()?)
+    prompt.interact()
 }
 
 fn resolve_destination(args: &AddArgs, ctx: &Context, cwd: &std::path::Path) -> Result<PathBuf> {

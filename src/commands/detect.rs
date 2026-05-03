@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use cliclack::{input, multiselect, select};
+use cliclack::{input, select};
+
+use crate::prompt::multiselect;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -249,7 +251,7 @@ fn select_new_skills(
             let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
             prompt = prompt.item(s.clone(), &s.name, hint);
         }
-        return Ok(prompt.interact()?);
+        return prompt.interact();
     }
     if !ctx.interactive {
         return Err(AppError::Config(
@@ -262,7 +264,7 @@ fn select_new_skills(
         let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
         prompt = prompt.item(s.clone(), &s.name, hint);
     }
-    Ok(prompt.interact()?)
+    prompt.interact()
 }
 
 fn resolve_target(args: &DetectArgs, ctx: &Context, library_root: &Path) -> Result<PathBuf> {
