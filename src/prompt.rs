@@ -22,7 +22,8 @@ use crossterm::cursor::{Hide, MoveToColumn, MoveUp, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
-    Clear, ClearType, disable_raw_mode, enable_raw_mode, size as terminal_size,
+    Clear, ClearType, DisableLineWrap, EnableLineWrap, disable_raw_mode, enable_raw_mode,
+    size as terminal_size,
 };
 use crossterm::{execute, queue};
 
@@ -96,11 +97,11 @@ impl<T: Clone> FilterMultiSelect<T> {
 
         let mut out = stdout();
         enable_raw_mode().context("enabling terminal raw mode")?;
-        execute!(out, Hide).context("hiding cursor")?;
+        execute!(out, Hide, DisableLineWrap).context("preparing terminal")?;
 
         let outcome = run_event_loop(&mut state, &mut out);
 
-        let _ = execute!(out, Show, ResetColor);
+        let _ = execute!(out, Show, EnableLineWrap, ResetColor);
         let _ = disable_raw_mode();
 
         match outcome {
@@ -367,13 +368,17 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
         }
     }
 
-    // Footer
+    // Footer (truncate to terminal width to avoid wrapping that would break
+    // the line count we use to clear on the next redraw)
+    let footer = footer_text(state);
+    let footer_max = cols.saturating_sub(3).max(10);
+    let footer = truncate_to(&footer, footer_max);
     queue!(
         out,
         SetForegroundColor(COLOR_DIM),
         Print(MARK_END),
         Print("  "),
-        Print(footer_text(state)),
+        Print(footer),
         ResetColor,
         Print("\r\n")
     )?;
@@ -384,10 +389,7 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
 
 fn footer_text<T>(state: &State<T>) -> String {
     let count = state.selected.len();
-    format!(
-        "{} selected • type to filter • space/tab to toggle • enter to confirm • esc to cancel",
-        count
-    )
+    format!("{count} selected • space toggle • enter confirm • esc cancel")
 }
 
 fn render_final<T>(out: &mut Stdout, state: &State<T>) -> Result<()> {
