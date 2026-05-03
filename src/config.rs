@@ -72,9 +72,9 @@ fn slug_for_url(url: &str) -> Result<String> {
             "unsupported URL: {url} — expected a GitHub HTTPS or SSH URL"
         ));
     };
-    let (owner, repo) = tail.split_once('/').ok_or_else(|| {
-        anyhow!("malformed GitHub URL: {url} — expected the form owner/repo")
-    })?;
+    let (owner, repo) = tail
+        .split_once('/')
+        .ok_or_else(|| anyhow!("malformed GitHub URL: {url} — expected the form owner/repo"))?;
     if owner.is_empty() || repo.is_empty() || repo.contains('/') {
         return Err(anyhow!(
             "malformed GitHub URL: {url} — expected the form owner/repo"

@@ -85,8 +85,8 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         AppError::Config("no library configured — run `skills init <github-url>` first".into())
     })?;
 
-    let library_root = config::library_cache_path(&library.url)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let library_root =
+        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
@@ -99,14 +99,19 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
         ui::log_warning(
             ctx,
-            format!("could not refresh library cache ({e}); diff is computed against the cached HEAD"),
+            format!(
+                "could not refresh library cache ({e}); diff is computed against the cached HEAD"
+            ),
         )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
-        ui::outro(ctx, "no skills installed in this project (.skills.toml is empty)")?;
+        ui::outro(
+            ctx,
+            "no skills installed in this project (.skills.toml is empty)",
+        )?;
         emit_json(ctx, &[], None);
         return Ok(());
     }
@@ -127,9 +132,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
 
     for c in &candidates {
         match &c.status {
-            SkillStatus::Unchanged => {
-                ui::log_info(ctx, format!("{} — no local changes", c.name))?
-            }
+            SkillStatus::Unchanged => ui::log_info(ctx, format!("{} — no local changes", c.name))?,
             SkillStatus::LibraryAhead { .. } => ui::log_info(
                 ctx,
                 format!("{} — library has updates (run `skills pull`)", c.name),
@@ -245,10 +248,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                         OnDivergence::Skip => LibMissingChoice::Skip,
                         OnDivergence::Fork => LibMissingChoice::Fork,
                         OnDivergence::Overwrite => {
-                            ui::log_warning(ctx, format!(
-                                "{} is removed from the library; --on-divergence overwrite cannot apply (only fork or skip)",
-                                candidate.name
-                            ))?;
+                            ui::log_warning(
+                                ctx,
+                                format!(
+                                    "{} is removed from the library; --on-divergence overwrite cannot apply (only fork or skip)",
+                                    candidate.name
+                                ),
+                            )?;
                             LibMissingChoice::Skip
                         }
                     }
@@ -271,11 +277,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                         "Fork as new skill",
                         "push the local content back as a new skill",
                     )
-                    .item(
-                        LibMissingChoice::Skip,
-                        "Skip",
-                        "leave this skill untracked",
-                    )
+                    .item(LibMissingChoice::Skip, "Skip", "leave this skill untracked")
                     .interact()?
                 };
                 match choice {
@@ -329,13 +331,10 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             ),
         };
         fs_util::replace_folder_contents(&local_dir, &library_dir)?;
-        git::add_all(&library_root, &library_relative)
-            .map_err(|e| AppError::Git(e.to_string()))?;
+        git::add_all(&library_root, &library_relative).map_err(|e| AppError::Git(e.to_string()))?;
     }
 
-    if !git::has_staged_changes(&library_root)
-        .map_err(|e| AppError::Git(e.to_string()))?
-    {
+    if !git::has_staged_changes(&library_root).map_err(|e| AppError::Git(e.to_string()))? {
         ui::outro(ctx, "no effective changes after applying selections")?;
         emit_json(ctx, &results, None);
         return Ok(());
@@ -358,8 +357,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .clone()
         .unwrap_or_else(|| build_commit_message(&updates, &adds));
 
-    let new_sha =
-        git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
+    let new_sha = git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
     git::push(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     let installed_at = OffsetDateTime::now_utc()
@@ -371,10 +369,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             ApplyOp::Update => {
                 let entry = &mut project_cfg.installed[apply.candidate_index];
                 entry.source_sha = new_sha.clone();
-                ui::log_success(
-                    ctx,
-                    format!("{} → {}", entry.name, short_sha(&new_sha)),
-                )?;
+                ui::log_success(ctx, format!("{} → {}", entry.name, short_sha(&new_sha)))?;
                 results.push(json!({
                     "name": entry.name,
                     "status": "pushed",
@@ -391,16 +386,14 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 let abs_new = cwd.join(new_local_destination);
                 if abs_old != abs_new {
                     if let Some(parent) = abs_new.parent() {
-                        fs::create_dir_all(parent).with_context(|| {
-                            format!("creating parent of {}", abs_new.display())
-                        })?;
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("creating parent of {}", abs_new.display()))?;
                     }
                     fs::rename(&abs_old, &abs_new).with_context(|| {
                         format!("renaming {} -> {}", abs_old.display(), abs_new.display())
                     })?;
                 }
-                let original_name =
-                    project_cfg.installed[apply.candidate_index].name.clone();
+                let original_name = project_cfg.installed[apply.candidate_index].name.clone();
                 project_cfg.installed[apply.candidate_index] = InstalledSkill {
                     name: new_name.clone(),
                     source_path: new_library_path.clone(),
@@ -437,11 +430,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         (u, f, s) => format!("pushed {u}, forked {f}, skipped {s}"),
     };
     ui::outro(ctx, summary)?;
-    emit_json(
-        ctx,
-        &results,
-        Some((new_sha.as_str(), message.as_str())),
-    );
+    emit_json(ctx, &results, Some((new_sha.as_str(), message.as_str())));
     Ok(())
 }
 
@@ -452,9 +441,7 @@ fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
     let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
     let forked = results.iter().filter(|r| r["status"] == "forked").count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
-    let commit_value = commit.map(|(sha, message)| {
-        json!({"sha": sha, "message": message})
-    });
+    let commit_value = commit.map(|(sha, message)| json!({"sha": sha, "message": message}));
     let out = json!({
         "command": "push",
         "results": results,
@@ -468,11 +455,7 @@ fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
     println!("{out}");
 }
 
-fn select_pushable(
-    args: &PushArgs,
-    ctx: &Context,
-    pushable: &[&Candidate],
-) -> Result<Vec<usize>> {
+fn select_pushable(args: &PushArgs, ctx: &Context, pushable: &[&Candidate]) -> Result<Vec<usize>> {
     if args.all {
         return Ok(pushable.iter().map(|c| c.index).collect());
     }
@@ -541,9 +524,7 @@ fn resolve_fork_op(
         raw_name.trim().to_string()
     } else {
         let suffix = fork_suffix.ok_or_else(|| {
-            AppError::Config(
-                "fork requires --fork-suffix in non-interactive mode".into(),
-            )
+            AppError::Config("fork requires --fork-suffix in non-interactive mode".into())
         })?;
         let candidate = format!("{}-{}", installed.name, suffix.trim());
         validate_fork_name(&candidate).map_err(|e| AppError::Config(e.to_string()))?;

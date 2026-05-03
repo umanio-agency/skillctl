@@ -77,8 +77,8 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         AppError::Config("no library configured — run `skills init <github-url>` first".into())
     })?;
 
-    let library_root = config::library_cache_path(&library.url)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let library_root =
+        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
@@ -91,14 +91,19 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
         ui::log_warning(
             ctx,
-            format!("could not refresh library cache ({e}); diff is computed against the cached HEAD"),
+            format!(
+                "could not refresh library cache ({e}); diff is computed against the cached HEAD"
+            ),
         )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
-        ui::outro(ctx, "no skills installed in this project (.skills.toml is empty)")?;
+        ui::outro(
+            ctx,
+            "no skills installed in this project (.skills.toml is empty)",
+        )?;
         emit_json(ctx, &[]);
         return Ok(());
     }
@@ -119,9 +124,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
 
     for c in &candidates {
         match &c.status {
-            SkillStatus::Unchanged => {
-                ui::log_info(ctx, format!("{} — up to date", c.name))?
-            }
+            SkillStatus::Unchanged => ui::log_info(ctx, format!("{} — up to date", c.name))?,
             SkillStatus::LocalChangesOnly => ui::log_info(
                 ctx,
                 format!(
@@ -256,15 +259,16 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
-    let new_sha =
-        git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
+    let new_sha = git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     for apply in &applies {
         let installed_name = project_cfg.installed[apply.candidate_index].name.clone();
-        let installed_destination =
-            project_cfg.installed[apply.candidate_index].destination.clone();
-        let installed_source_path =
-            project_cfg.installed[apply.candidate_index].source_path.clone();
+        let installed_destination = project_cfg.installed[apply.candidate_index]
+            .destination
+            .clone();
+        let installed_source_path = project_cfg.installed[apply.candidate_index]
+            .source_path
+            .clone();
         let local_dir = cwd.join(&installed_destination);
         let library_dir = library_root.join(&installed_source_path);
 
@@ -272,10 +276,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
             ApplyOp::Pull => {
                 fs_util::replace_folder_contents(&library_dir, &local_dir)?;
                 project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
-                ui::log_success(
-                    ctx,
-                    format!("{} → {}", installed_name, short_sha(&new_sha)),
-                )?;
+                ui::log_success(ctx, format!("{} → {}", installed_name, short_sha(&new_sha)))?;
                 results.push(json!({
                     "name": installed_name,
                     "status": "pulled",
@@ -296,7 +297,11 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                     .into());
                 }
                 fs::rename(&local_dir, &fork_dest).with_context(|| {
-                    format!("renaming {} -> {}", local_dir.display(), fork_dest.display())
+                    format!(
+                        "renaming {} -> {}",
+                        local_dir.display(),
+                        fork_dest.display()
+                    )
                 })?;
                 fs_util::copy_dir_all(&library_dir, &local_dir)?;
                 project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
@@ -374,14 +379,11 @@ fn select_pullable(args: &PullArgs, ctx: &Context, pullable: &[&Candidate]) -> R
     if !args.skills.is_empty() {
         let mut chosen = Vec::with_capacity(args.skills.len());
         for name in &args.skills {
-            let candidate = pullable
-                .iter()
-                .find(|c| c.name == *name)
-                .ok_or_else(|| {
-                    AppError::Config(format!(
-                        "no pullable skill named `{name}` (skill is up to date or unknown)"
-                    ))
-                })?;
+            let candidate = pullable.iter().find(|c| c.name == *name).ok_or_else(|| {
+                AppError::Config(format!(
+                    "no pullable skill named `{name}` (skill is up to date or unknown)"
+                ))
+            })?;
             chosen.push(candidate.index);
         }
         return Ok(chosen);
@@ -437,9 +439,7 @@ fn resolve_local_fork_op(
         raw_name.trim().to_string()
     } else {
         let suffix = fork_suffix.ok_or_else(|| {
-            AppError::Config(
-                "fork-locally requires --fork-suffix in non-interactive mode".into(),
-            )
+            AppError::Config("fork-locally requires --fork-suffix in non-interactive mode".into())
         })?;
         let candidate = format!("{}-{}", installed.name, suffix.trim());
         validate_fork_name(&candidate).map_err(|e| AppError::Config(e.to_string()))?;

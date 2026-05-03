@@ -34,8 +34,8 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         AppError::Config("no library configured — run `skills init <github-url>` first".into())
     })?;
 
-    let library_root = config::library_cache_path(&library.url)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let library_root =
+        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skills init {}` again",
@@ -71,7 +71,10 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         .collect();
 
     if new_skills.is_empty() {
-        ui::outro(ctx, "no new skills detected (everything is tracked in .skills.toml)")?;
+        ui::outro(
+            ctx,
+            "no new skills detected (everything is tracked in .skills.toml)",
+        )?;
         emit_json(ctx, None, &[], None);
         return Ok(());
     }
@@ -130,9 +133,7 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         git::add_all(&library_root, lib_relative).map_err(|e| AppError::Git(e.to_string()))?;
     }
 
-    if !git::has_staged_changes(&library_root)
-        .map_err(|e| AppError::Git(e.to_string()))?
-    {
+    if !git::has_staged_changes(&library_root).map_err(|e| AppError::Git(e.to_string()))? {
         ui::outro(ctx, "no effective changes after adding")?;
         emit_json(ctx, Some(&lib_dest_relative), &results, None);
         return Ok(());
@@ -144,8 +145,7 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     } else {
         format!("add skills: {}", names.join(", "))
     };
-    let new_sha =
-        git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
+    let new_sha = git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
     git::push(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     let installed_at = OffsetDateTime::now_utc()
@@ -172,7 +172,10 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     }
     project_config::save(&cwd, &project_cfg)?;
 
-    ui::outro(ctx, format!("added {} skill(s) to the library", applies.len()))?;
+    ui::outro(
+        ctx,
+        format!("added {} skill(s) to the library", applies.len()),
+    )?;
     emit_json(
         ctx,
         Some(&lib_dest_relative),
@@ -193,9 +196,7 @@ fn emit_json(
     }
     let added = results.iter().filter(|r| r["status"] == "added").count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
-    let commit_value = commit.map(|(sha, message)| {
-        json!({"sha": sha, "message": message})
-    });
+    let commit_value = commit.map(|(sha, message)| json!({"sha": sha, "message": message}));
     let out = json!({
         "command": "detect",
         "target": target.map(|t| t.display().to_string()),
@@ -209,11 +210,7 @@ fn emit_json(
     println!("{out}");
 }
 
-fn select_new_skills(
-    args: &DetectArgs,
-    ctx: &Context,
-    new_skills: &[Skill],
-) -> Result<Vec<Skill>> {
+fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> Result<Vec<Skill>> {
     if args.all {
         return Ok(new_skills.to_vec());
     }
