@@ -199,15 +199,11 @@ fn run_event_loop<T: Clone>(
                         }
                         return Ok(());
                     }
-                    KeyCode::Up => {
-                        if state.focus > 0 {
-                            state.focus -= 1;
-                        }
+                    KeyCode::Up if state.focus > 0 => {
+                        state.focus -= 1;
                     }
-                    KeyCode::Down => {
-                        if state.focus + 1 < state.visible.len() {
-                            state.focus += 1;
-                        }
+                    KeyCode::Down if state.focus + 1 < state.visible.len() => {
+                        state.focus += 1;
                     }
                     KeyCode::Tab | KeyCode::Char(' ') => {
                         if let Some(&idx) = state.visible.get(state.focus) {
@@ -218,11 +214,9 @@ fn run_event_loop<T: Clone>(
                             }
                         }
                     }
-                    KeyCode::Backspace => {
-                        if !state.query.is_empty() {
-                            state.query.pop();
-                            state.refilter();
-                        }
+                    KeyCode::Backspace if !state.query.is_empty() => {
+                        state.query.pop();
+                        state.refilter();
                     }
                     KeyCode::Char(c) if !c.is_control() => {
                         state.query.push(c);
