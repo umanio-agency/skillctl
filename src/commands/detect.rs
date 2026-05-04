@@ -97,7 +97,11 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
                 skill.path.display()
             ))
         })?;
-        let lib_relative = lib_dest_relative.join(folder_name);
+        let lib_relative = if is_root(&lib_dest_relative) {
+            PathBuf::from(folder_name)
+        } else {
+            lib_dest_relative.join(folder_name)
+        };
         let lib_absolute = library_root.join(&lib_relative);
 
         if lib_absolute.exists() {
@@ -197,9 +201,16 @@ fn emit_json(
     let added = results.iter().filter(|r| r["status"] == "added").count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
     let commit_value = commit.map(|(sha, message)| json!({"sha": sha, "message": message}));
+    let target_value = target.map(|t| {
+        if is_root(t) {
+            ".".to_string()
+        } else {
+            t.display().to_string()
+        }
+    });
     let out = json!({
         "command": "detect",
-        "target": target.map(|t| t.display().to_string()),
+        "target": target_value,
         "results": results,
         "commit": commit_value,
         "summary": {
@@ -208,6 +219,13 @@ fn emit_json(
         },
     });
     println!("{out}");
+}
+
+/// True if the target path means "library root" — either an empty path or a
+/// bare `.`. Used to keep `lib_relative` clean (no leading `./`) and to
+/// normalise the JSON output.
+fn is_root(p: &Path) -> bool {
+    p.as_os_str().is_empty() || p == Path::new(".")
 }
 
 fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> Result<Vec<Skill>> {
@@ -289,7 +307,17 @@ fn pick_library_destination(library_root: &Path) -> Result<PathBuf> {
 
     let mut prompt = select("Library destination");
 
+    // Library root first — it's the default for flat-layout libraries where
+    // each skill is a top-level folder.
+    prompt = prompt.item(
+        LibDestChoice::Existing(PathBuf::from(".")),
+        "Library root",
+        "add the skill folder directly under the library's top level",
+    );
+
     if folders.is_empty() {
+        // Convenient preset for libraries that haven't created the conventional
+        // `skills/` subfolder yet.
         prompt = prompt.item(
             LibDestChoice::Existing(PathBuf::from("skills")),
             "skills",
