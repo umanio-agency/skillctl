@@ -186,8 +186,8 @@ pub struct DetectArgs {
     #[arg(long, requires = "tags")]
     pub all_tags: bool,
 
-    /// Target path inside the library (e.g. `skills` or `.claude/skills`).
-    /// Required in non-interactive mode.
+    /// Target path inside the library (e.g. `.` for the library root,
+    /// `skills`, or `.claude/skills`). Required in non-interactive mode.
     #[arg(long, value_name = "PATH")]
     pub target: Option<PathBuf>,
 }

@@ -186,7 +186,7 @@ skills detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-path>
 | `--all` | Add every detected new skill. Mutually exclusive with `--skill`/`--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Add every newly detected skill carrying this tag (repeatable). Default semantics is union. Mutually exclusive with `--skill`/`--all`. | Yes, unless `--skill` or `--all` |
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. | No |
-| `--target <path>` | Library-relative folder where the new skills should land (e.g. `skills` or `.claude/skills`). | **Yes** |
+| `--target <path>` | Library-relative folder where the new skills should land. Use `.` for the library root (flat-layout libraries), or e.g. `skills` / `.claude/skills` for a subfolder. | **Yes** |
 
 `skills detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.
 
@@ -294,10 +294,16 @@ skills pull --all --on-divergence overwrite
 skills pull --all --on-divergence fork --fork-suffix local
 ```
 
-### Contribute every new local skill back to the library
+### Contribute every new local skill back to the library (library root)
 
 ```sh
-skills detect --all --target .claude/skills
+skills detect --all --target .
+```
+
+### Contribute new local skills to a `skills/` subfolder of the library
+
+```sh
+skills detect --all --target skills
 ```
 
 ### Push specific skills with a custom message
