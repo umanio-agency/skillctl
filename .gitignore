@@ -1,2 +1,6 @@
 /target
 .DS_Store
+
+# `.skills.toml` is per-project install state written by `skillctl add`.
+# It belongs in consuming projects, not in this repo.
+.skills.toml

@@ -2,6 +2,7 @@
 name = "skills-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "CLI tool to manage your personal Claude skills library across projects"
 license = "MIT"
 repository = "https://github.com/umanio-agency/skills-cli"
