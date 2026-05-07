@@ -4,7 +4,7 @@ CLI tool to manage personal Claude skills libraries across projects. Pre-v1.
 
 ## Stack
 - Rust, edition 2024
-- Binary crate `skills-cli`, binary name `skills` (see `[[bin]]` in `Cargo.toml`)
+- Binary crate `skills-cli`, binary name `skillctl` (see `[[bin]]` in `Cargo.toml`)
 
 ## Commands
 - `cargo build` / `cargo run -- <args>` / `cargo test`
