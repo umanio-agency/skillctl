@@ -10,7 +10,7 @@ keywords = ["claude", "skills", "cli"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "skills"
+name = "skillctl"
 path = "src/main.rs"
 
 [dependencies]

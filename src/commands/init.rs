@@ -10,7 +10,7 @@ use crate::git;
 use crate::ui;
 
 pub fn run(args: InitArgs, ctx: &Context) -> Result<()> {
-    ui::intro(ctx, "skills init")?;
+    ui::intro(ctx, "skillctl init")?;
 
     git::ensure_available().map_err(|e| AppError::Git(e.to_string()))?;
 

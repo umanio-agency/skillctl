@@ -1,18 +1,18 @@
 ---
 name: skills-cli-usage
-description: How to drive the `skills` CLI non-interactively. Load PROACTIVELY when the user asks to install, push, or contribute Claude skills, or mentions a "skills library" / "skills repo". Covers every command's flag surface, exit codes, and end-to-end recipes so an agent can run `skills` without a TTY.
+description: How to drive the `skillctl` CLI non-interactively. Load PROACTIVELY when the user asks to install, push, or contribute Claude skills, or mentions a "skills library" / "skills repo". Covers every command's flag surface, exit codes, and end-to-end recipes so an agent can run `skillctl` without a TTY.
 tags: [meta, agent-tooling]
 ---
 
 # skills-cli-usage
 
-`skills` is a Rust CLI that manages a personal Claude skills library across projects. This skill is the agent-facing reference: it documents how to drive every command **without prompts**, so any agent (Claude Code or otherwise) can use it as a tool.
+`skillctl` is a Rust CLI that manages a personal Claude skills library across projects. This skill is the agent-facing reference: it documents how to drive every command **without prompts**, so any agent (Claude Code or otherwise) can use it as a tool.
 
 > If you're a human reading this, the same flags work in interactive mode — they pre-fill choices and skip the relevant prompts.
 
 ## How non-interactive mode is selected
 
-`skills` auto-detects whether stdin and stdout are TTYs. When called from a script, agent, or pipe, it switches to non-interactive mode automatically. You can also force it explicitly with the global `--no-interaction` flag, or with `--json` (which implies it).
+`skillctl` auto-detects whether stdin and stdout are TTYs. When called from a script, agent, or pipe, it switches to non-interactive mode automatically. You can also force it explicitly with the global `--no-interaction` flag, or with `--json` (which implies it).
 
 In non-interactive mode, **every decision must come from a flag.** If a required input is missing, the command exits with a clear error rather than silently falling back to a prompt.
 
@@ -44,14 +44,14 @@ Per-command top-level shape:
 
 Stable rules:
 - The `command` field always matches the subcommand name.
-- `results[]` only contains skills that were *acted on* (installed, pushed, forked, pulled, added, or explicitly skipped). Skills that were silently no-ops (e.g. unchanged on `push`) are not in `results[]`. To enumerate everything, use `skills list --json`.
+- `results[]` only contains skills that were *acted on* (installed, pushed, forked, pulled, added, or explicitly skipped). Skills that were silently no-ops (e.g. unchanged on `push`) are not in `results[]`. To enumerate everything, use `skillctl list --json`.
 - `summary` totals exactly equal the count of corresponding `status` values in `results[]`.
 - `commit` is `null` when no commit was made (nothing to apply, or library-only-read commands like `pull`/`list`).
 
 ## One-time setup: link a library
 
 ```sh
-skills init https://github.com/<owner>/<repo>
+skillctl init https://github.com/<owner>/<repo>
 ```
 
 - Clones the library repo into a platform-appropriate cache.
@@ -61,11 +61,11 @@ skills init https://github.com/<owner>/<repo>
 
 ## Commands
 
-### `skills list` — read-only
+### `skillctl list` — read-only
 
 ```sh
-skills list
-skills list --tag <tag> [--tag <tag> …] [--all-tags]
+skillctl list
+skillctl list --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
 Refreshes the library cache (best-effort `git fetch`) and prints every skill with its name, any frontmatter tags in `[…]`, and a one-line description.
@@ -75,12 +75,12 @@ Refreshes the library cache (best-effort `git fetch`) and prints every skill wit
 | `--tag <tag>` | Filter to skills carrying this tag. Repeatable; default semantics is union (any of the given tags). |
 | `--all-tags` | Switch to intersection (skill must carry every requested tag). Requires `--tag`. |
 
-### `skills add` — install skills from the library into a project
+### `skillctl add` — install skills from the library into a project
 
 ```sh
-skills add --skill <name> [--skill <name> …] --dest <path>
-skills add --all --dest <path>
-skills add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
+skillctl add --skill <name> [--skill <name> …] --dest <path>
+skillctl add --all --dest <path>
+skillctl add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
 ```
 
 | Flag | Purpose | Required in non-interactive |
@@ -129,12 +129,12 @@ description: >
   one long sentence wrapped in source.
 ```
 
-### `skills push` — propagate local edits back to the library
+### `skillctl push` — propagate local edits back to the library
 
 ```sh
-skills push --skill <name> [--skill <name> …]
-skills push --all
-skills push --tag <tag> [--tag <tag> …] [--all-tags]
+skillctl push --skill <name> [--skill <name> …]
+skillctl push --all
+skillctl push --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
 | Flag | Purpose |
@@ -147,16 +147,16 @@ skills push --tag <tag> [--tag <tag> …] [--all-tags]
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New name = `<original>-<suffix>`. |
 | `--message <text>` | Override the auto-generated commit message. |
 
-For each pushable skill, `skills push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits **once** for the whole run and pushes to the library remote. The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to the new HEAD.
+For each pushable skill, `skillctl push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits **once** for the whole run and pushes to the library remote. The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to the new HEAD.
 
 **Fork** (creating a new library skill from local edits) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: every divergent (or library-missing) skill is forked under the name `<original>-<suffix>`.
 
-### `skills pull` — refresh installed skills from the library
+### `skillctl pull` — refresh installed skills from the library
 
 ```sh
-skills pull --skill <name> [--skill <name> …]
-skills pull --all
-skills pull --tag <tag> [--tag <tag> …] [--all-tags]
+skillctl pull --skill <name> [--skill <name> …]
+skillctl pull --all
+skillctl pull --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
 | Flag | Purpose |
@@ -168,16 +168,16 @@ skills pull --tag <tag> [--tag <tag> …] [--all-tags]
 | `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent skills. `fork` here means **fork-locally** (rename the local copy under a new name, then pull the library version into the original destination). Default when omitted: skip. |
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New local name = `<original>-<suffix>`. |
 
-For each pullable skill, `skills pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow.
+For each pullable skill, `skillctl pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow.
 
 **Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: each divergent skill's local folder is renamed to `<original>-<suffix>`, then the library version drops into the original destination.
 
-### `skills detect` — find new local skills and add them to the library
+### `skillctl detect` — find new local skills and add them to the library
 
 ```sh
-skills detect --skill <name> [--skill <name> …] --target <library-path>
-skills detect --all --target <library-path>
-skills detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-path>
+skillctl detect --skill <name> [--skill <name> …] --target <library-path>
+skillctl detect --all --target <library-path>
+skillctl detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-path>
 ```
 
 | Flag | Purpose | Required in non-interactive |
@@ -188,7 +188,7 @@ skills detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-path>
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. | No |
 | `--target <path>` | Library-relative folder where the new skills should land. Use `.` for the library root (flat-layout libraries), or e.g. `skills` / `.claude/skills` for a subfolder. | **Yes** |
 
-`skills detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.
+`skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.
 
 ## Skill identity
 
@@ -206,7 +206,7 @@ Agents should branch on exit code first, then optionally inspect stderr for cont
 
 ## Output
 
-`skills` prints a tree-style human log to stdout in interactive/default mode (intro line, per-skill `log::*` lines, outro summary). In `--json` mode, that human log is suppressed and a single structured JSON object lands on stdout instead — see "Structured output: `--json`" above for shapes.
+`skillctl` prints a tree-style human log to stdout in interactive/default mode (intro line, per-skill `log::*` lines, outro summary). In `--json` mode, that human log is suppressed and a single structured JSON object lands on stdout instead — see "Structured output: `--json`" above for shapes.
 
 Errors always go to stderr regardless of mode.
 
@@ -230,98 +230,98 @@ Agents driving the CLI never see this prompt — `--json` and non-TTY contexts s
 ### Install a fresh project's skills
 
 ```sh
-skills init git@github.com:me/skills.git
-skills add --skill claude-api --skill review --dest .claude/skills
+skillctl init git@github.com:me/skills.git
+skillctl add --skill claude-api --skill review --dest .claude/skills
 ```
 
 ### Bulk-install everything
 
 ```sh
-skills add --all --dest .claude/skills --on-conflict skip
+skillctl add --all --dest .claude/skills --on-conflict skip
 ```
 
 ### Bulk-install every skill carrying a tag
 
 ```sh
-skills add --tag api --dest .claude/skills
+skillctl add --tag api --dest .claude/skills
 ```
 
 ### Install only skills tagged with both `code-review` AND `gitlab`
 
 ```sh
-skills add --tag code-review --tag gitlab --all-tags --dest .claude/skills
+skillctl add --tag code-review --tag gitlab --all-tags --dest .claude/skills
 ```
 
 ### List every skill tagged `meta`
 
 ```sh
-skills list --tag meta
+skillctl list --tag meta
 ```
 
 ### Push every local edit, defaulting to skip on conflicts
 
 ```sh
-skills push --all
+skillctl push --all
 ```
 
 ### Force-push everything, including diverged skills
 
 ```sh
-skills push --all --on-divergence overwrite
+skillctl push --all --on-divergence overwrite
 ```
 
 ### Fork every diverged skill under a `<name>-custom` library entry
 
 ```sh
-skills push --all --on-divergence fork --fork-suffix custom
+skillctl push --all --on-divergence fork --fork-suffix custom
 ```
 
 ### Pull every available library update
 
 ```sh
-skills pull --all
+skillctl pull --all
 ```
 
 ### Force-pull everything, even where local has unrelated edits
 
 ```sh
-skills pull --all --on-divergence overwrite
+skillctl pull --all --on-divergence overwrite
 ```
 
 ### Pull updates while keeping your local edits as `<name>-local`
 
 ```sh
-skills pull --all --on-divergence fork --fork-suffix local
+skillctl pull --all --on-divergence fork --fork-suffix local
 ```
 
 ### Contribute every new local skill back to the library (library root)
 
 ```sh
-skills detect --all --target .
+skillctl detect --all --target .
 ```
 
 ### Contribute new local skills to a `skills/` subfolder of the library
 
 ```sh
-skills detect --all --target skills
+skillctl detect --all --target skills
 ```
 
 ### Push specific skills with a custom message
 
 ```sh
-skills push --skill review --skill security-review --message "polish: tighter reviewer prompts"
+skillctl push --skill review --skill security-review --message "polish: tighter reviewer prompts"
 ```
 
 ## Failure modes worth checking before invoking
 
-1. **No library configured.** Calls fail with `no library configured — run skills init <github-url> first`. Run `skills init` (or check for an existing library URL via inspecting `~/.config/skills-cli/config.toml` on Linux or the equivalent under `~/Library/Application Support/dev.umanio-agency.skills-cli/` on macOS).
-2. **Library cache deleted.** Same fix: re-run `skills init` with the URL.
+1. **No library configured.** Calls fail with `no library configured — run skillctl init <github-url> first`. Run `skillctl init` (or check for an existing library URL via inspecting `~/.config/skills-cli/config.toml` on Linux or the equivalent under `~/Library/Application Support/dev.umanio-agency.skills-cli/` on macOS).
+2. **Library cache deleted.** Same fix: re-run `skillctl init` with the URL.
 3. **Push without `user.name`/`user.email` configured globally.** Git itself errors out — the message is forwarded verbatim. Fix: `git config --global user.name …` / `user.email …`.
 4. **`--target` for `detect` must be relative to the library root.** Absolute paths are rejected with a clear message.
 5. **`--skill <name>` with a name not in the library / not detected.** Fails fast.
 
 ## Constraints to remember
 
-- `skills` does not handle merges. When local and library both moved past the recorded `source_sha`, the operator chooses one side; there is no automatic three-way merge.
-- `skills push` always produces **one commit per run**, regardless of how many skills are touched.
+- `skillctl` does not handle merges. When local and library both moved past the recorded `source_sha`, the operator chooses one side; there is no automatic three-way merge.
+- `skillctl push` always produces **one commit per run**, regardless of how many skills are touched.
 - Forking is now supported non-interactively via `--on-divergence fork --fork-suffix <s>` — the suffix is appended to each forked skill's name. Without `--fork-suffix`, fork stays interactive (each fork prompts for a name).

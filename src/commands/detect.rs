@@ -27,18 +27,18 @@ enum LibDestChoice {
 }
 
 pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
-    ui::intro(ctx, "skills detect")?;
+    ui::intro(ctx, "skillctl detect")?;
 
     let cfg = config::load()?;
     let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
     })?;
 
     let library_root =
         config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skills init {}` again",
+            "library cache not found at {} — run `skillctl init{}` again",
             library_root.display(),
             library.url
         ))

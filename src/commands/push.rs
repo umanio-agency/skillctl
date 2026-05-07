@@ -68,7 +68,7 @@ enum ApplyOp {
 }
 
 pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
-    ui::intro(ctx, "skills push")?;
+    ui::intro(ctx, "skillctl push")?;
 
     if matches!(args.on_divergence, Some(OnDivergence::Fork))
         && !ctx.interactive
@@ -82,14 +82,14 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
 
     let cfg = config::load()?;
     let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skills init <github-url>` first".into())
+        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
     })?;
 
     let library_root =
         config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skills init {}` again",
+            "library cache not found at {} — run `skillctl init{}` again",
             library_root.display(),
             library.url
         ))
@@ -135,7 +135,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             SkillStatus::Unchanged => ui::log_info(ctx, format!("{} — no local changes", c.name))?,
             SkillStatus::LibraryAhead { .. } => ui::log_info(
                 ctx,
-                format!("{} — library has updates (run `skills pull`)", c.name),
+                format!("{} — library has updates (run `skillctl pull`)", c.name),
             )?,
             SkillStatus::LocalMissing => ui::log_warning(
                 ctx,
@@ -622,7 +622,7 @@ fn describe(status: &SkillStatus) -> String {
             library_changed,
         } => format!("diverged: {local_changed} local, {library_changed} in library"),
         SkillStatus::LibraryAhead { library_changed } => {
-            format!("library has {library_changed} update(s); use `skills pull`")
+            format!("library has {library_changed} update(s); use `skillctl pull`")
         }
         SkillStatus::Unchanged => "no local changes".to_string(),
         SkillStatus::LocalMissing => "destination missing locally".to_string(),

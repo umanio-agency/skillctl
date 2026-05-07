@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "skills",
+    name = "skillctl",
     version,
     about = "Manage your personal Claude skills library across projects."
 )]
