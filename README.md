@@ -5,7 +5,7 @@
 
 > The contributor-side CLI for personal Claude skills libraries. Binary: **`skillctl`**.
 
-> Status: pre-v1, in active development. Repo is private until v1.
+> Status: pre-v1, in active development.
 
 ## What this is
 
