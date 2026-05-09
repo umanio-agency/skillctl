@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a bug in skillctl (the skills-cli binary).
+title: "bug: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Reproductions speed up triage a lot — please fill in as much of the form as you can.
+
+  - type: input
+    id: version
+    attributes:
+      label: skillctl --version
+      placeholder: "e.g. skillctl 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 14.5, Ubuntu 24.04, Windows 11 + WSL"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: Paste the exact `skillctl …` invocation. Redact any sensitive paths.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened
+      description: Include full stderr output and the exit code if relevant.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: skills_toml
+    attributes:
+      label: Relevant `.skills.toml` (optional)
+      description: Helpful for `add` / `push` / `pull` / `detect` bugs.
+      render: toml
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I'm running on Rust 1.85 or later (`rustc --version`).
+          required: true
+        - label: I have `git` available on `PATH`.
+          required: true
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
