@@ -1,5 +1,8 @@
 # skills-cli
 
+[![CI](https://github.com/umanio-agency/skills-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/umanio-agency/skills-cli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 > The contributor-side CLI for personal Claude skills libraries. Binary: **`skillctl`**.
 
 > Status: pre-v1, in active development. Repo is private until v1.
