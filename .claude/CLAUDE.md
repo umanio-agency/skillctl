@@ -33,7 +33,7 @@ Core flows the CLI must support:
 ## Git / commits
 - **Never** add `Co-Authored-By: Claude ...` (or any Claude/Anthropic co-author trailer) to commit messages.
 - Subject in imperative mood; body explains *why*, not *what*.
-- Default branch: `main`. Remote: `origin` → `umanio-agency/skills-cli` (private until v1).
+- Default branch: `main`. Remote: `origin` → `umanio-agency/skills-cli`.
 - Never force-push without explicit user approval.
 
 ## Out of scope until requested
