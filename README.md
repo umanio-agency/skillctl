@@ -1,6 +1,6 @@
-# skills-cli
+# skillctl
 
-[![CI](https://github.com/umanio-agency/skills-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/umanio-agency/skills-cli/actions/workflows/ci.yml)
+[![CI](https://github.com/umanio-agency/skillctl/actions/workflows/ci.yml/badge.svg)](https://github.com/umanio-agency/skillctl/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 > The contributor-side CLI for personal Claude skills libraries. Binary: **`skillctl`**.
@@ -31,8 +31,8 @@ Plus `init` (link a library). Every multi-skill flow supports `--tag` filtering 
 Build from source:
 
 ```sh
-git clone https://github.com/umanio-agency/skills-cli.git
-cd skills-cli
+git clone https://github.com/umanio-agency/skillctl.git
+cd skillctl
 cargo install --path .
 ```
 
@@ -92,7 +92,7 @@ Every interactive flow has flag-driven equivalents so an LLM agent can drive the
 
 Stable exit codes: `0` success (incl. nothing-to-do), `1` generic, `2` config (missing flag, no library, etc.), `3` conflict, `4` git error.
 
-The full agent contract — flag matrix per command, JSON shapes, recipes, failure modes — lives in [`.claude/skills/skills-cli-usage/SKILL.md`](.claude/skills/skills-cli-usage/SKILL.md). It's installable into any project via `skillctl add` so the project's agent picks it up.
+The full agent contract — flag matrix per command, JSON shapes, recipes, failure modes — lives in [`.claude/skills/skillctl-usage/SKILL.md`](.claude/skills/skillctl-usage/SKILL.md). It's installable into any project via `skillctl add` so the project's agent picks it up.
 
 ## Comparison with `npx skills`
 

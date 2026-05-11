@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for the suggestion. Please describe the **use case** first — the underlying need is more useful than a pre-decided solution.
 
-        skills-cli is intentionally narrow (the round-trip vision: push, detect, fork, pull). Features outside that scope will likely be deferred or pointed at `npx skills` — see the README's "Comparison with npx skills".
+        skillctl is intentionally narrow (the round-trip vision: push, detect, fork, pull). Features outside that scope will likely be deferred or pointed at `npx skills` — see the README's "Comparison with npx skills".
 
   - type: textarea
     id: problem
@@ -37,7 +37,7 @@ body:
     attributes:
       label: Pre-flight checks
       options:
-        - label: I checked the README and `.claude/skills/skills-cli-usage/SKILL.md` for an existing flag that solves this.
+        - label: I checked the README and `.claude/skills/skillctl-usage/SKILL.md` for an existing flag that solves this.
           required: true
         - label: I searched existing issues and didn't find a duplicate.
           required: true

@@ -1,10 +1,10 @@
 ---
-name: skills-cli-usage
+name: skillctl-usage
 description: How to drive the `skillctl` CLI non-interactively. Load PROACTIVELY when the user asks to install, push, or contribute Claude skills, or mentions a "skills library" / "skills repo". Covers every command's flag surface, exit codes, and end-to-end recipes so an agent can run `skillctl` without a TTY.
 tags: [meta, agent-tooling]
 ---
 
-# skills-cli-usage
+# skillctl-usage
 
 `skillctl` is a Rust CLI that manages a personal Claude skills library across projects. This skill is the agent-facing reference: it documents how to drive every command **without prompts**, so any agent (Claude Code or otherwise) can use it as a tool.
 

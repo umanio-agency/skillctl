@@ -1,11 +1,11 @@
-# Contributing to skills-cli
+# Contributing to skillctl
 
-Thanks for your interest. `skills-cli` is pre-v1, so the contribution surface is intentionally narrow: the goal is **fits the round-trip vision** (push, detect, fork, pull) rather than "any feature is welcome".
+Thanks for your interest. `skillctl` is pre-v1, so the contribution surface is intentionally narrow: the goal is **fits the round-trip vision** (push, detect, fork, pull) rather than "any feature is welcome".
 
 ## Before you start
 
 - For non-trivial changes, **open an issue first** so we can align on the approach. Bug fixes, doc improvements, and clear UX papercuts can go straight to a PR.
-- Look at [`.claude/skills/skills-cli-project/SKILL.md`](.claude/skills/skills-cli-project/SKILL.md) — vision, architecture, and an append-only decisions log. Many design questions already have a recorded answer there.
+- Look at [`.claude/skills/skillctl-project/SKILL.md`](.claude/skills/skillctl-project/SKILL.md) — vision, architecture, and an append-only decisions log. Many design questions already have a recorded answer there.
 
 ## Dev setup
 
@@ -15,8 +15,8 @@ Requirements:
 - `git` available on `PATH` (the CLI shells out to it)
 
 ```sh
-git clone https://github.com/umanio-agency/skills-cli.git
-cd skills-cli
+git clone https://github.com/umanio-agency/skillctl.git
+cd skillctl
 cargo build
 ```
 

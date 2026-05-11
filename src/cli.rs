@@ -16,7 +16,7 @@ pub struct Cli {
     pub no_interaction: bool,
 
     /// Emit a structured JSON object to stdout (per-command schema documented
-    /// in skills-cli-usage). Implies --no-interaction; suppresses the
+    /// in skillctl-usage). Implies --no-interaction; suppresses the
     /// human-readable cliclack output.
     #[arg(long, global = true)]
     pub json: bool,

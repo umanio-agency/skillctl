@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Crate renamed from `skills-cli` to `skillctl` to publish on crates.io (the `skills-cli` crate name was already taken by an unrelated package).
+- GitHub repository renamed from `umanio-agency/skills-cli` to `umanio-agency/skillctl`. GitHub redirects from the old URL still work for inbound links.
+- Companion skill folders moved: `.claude/skills/skills-cli-{project,usage}/` → `.claude/skills/skillctl-{project,usage}/`.
+- Config and cache paths (`dev.umanio-agency.skills-cli`, `~/.config/skills-cli/`, `~/.cache/skills-cli/`) intentionally **kept** to avoid breaking existing local state for no user-facing gain.
+
 ## [0.1.0] - 2026-05-09
 
 ### Added

@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a bug in skillctl (the skills-cli binary).
+description: Report a bug in skillctl.
 title: "bug: "
 labels: ["bug", "triage"]
 body:
