@@ -1,10 +1,10 @@
-# skills-cli
+# skillctl
 
 CLI tool to manage personal Claude skills libraries across projects. Pre-v1.
 
 ## Stack
 - Rust, edition 2024
-- Binary crate `skills-cli`, binary name `skillctl` (see `[[bin]]` in `Cargo.toml`)
+- Binary crate `skillctl`, binary name `skillctl` (see `[[bin]]` in `Cargo.toml`)
 
 ## Commands
 - `cargo build` / `cargo run -- <args>` / `cargo test`
@@ -33,7 +33,7 @@ Core flows the CLI must support:
 ## Git / commits
 - **Never** add `Co-Authored-By: Claude ...` (or any Claude/Anthropic co-author trailer) to commit messages.
 - Subject in imperative mood; body explains *why*, not *what*.
-- Default branch: `main`. Remote: `origin` → `umanio-agency/skills-cli`.
+- Default branch: `main`. Remote: `origin` → `umanio-agency/skillctl`.
 - Never force-push without explicit user approval.
 
 ## Out of scope until requested
