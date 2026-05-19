@@ -5,8 +5,8 @@
 # It belongs in consuming projects, not in this repo.
 .skills.toml
 
-# Locally-installed Claude skills that aren't part of skillctl itself
-# (project-internal companion skills are kept under their own folders).
+# Locally-installed Claude skills that aren't part of skillctl itself.
+# Only the public-facing companion (`skillctl-usage`, the agent contract
+# shipped with the tool) is whitelisted. `skillctl-project` is kept local-only.
 .claude/skills/*/
-!.claude/skills/skillctl-project/
 !.claude/skills/skillctl-usage/
