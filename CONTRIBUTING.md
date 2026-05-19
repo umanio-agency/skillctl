@@ -5,7 +5,7 @@ Thanks for your interest. `skillctl` is pre-v1, so the contribution surface is i
 ## Before you start
 
 - For non-trivial changes, **open an issue first** so we can align on the approach. Bug fixes, doc improvements, and clear UX papercuts can go straight to a PR.
-- Read the [README](README.md) — the "What this is" / "What it does" / "Comparison with `npx skills`" sections capture the round-trip vision and the scope `skillctl` is trying to hold.
+- Read the [README](README.md) — the "What this is" and "What it does" sections capture the round-trip vision and the scope `skillctl` is trying to hold.
 
 ## Dev setup
 

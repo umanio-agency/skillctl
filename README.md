@@ -3,26 +3,35 @@
 [![CI](https://github.com/umanio-agency/skillctl/actions/workflows/ci.yml/badge.svg)](https://github.com/umanio-agency/skillctl/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> The contributor-side CLI for personal Claude skills libraries. Binary: **`skillctl`**.
+> CLI to manage your personal library of Claude skills across projects. Binary: **`skillctl`**.
 
 > Status: pre-v1, in active development.
 
 ## What this is
 
-[`vercel-labs/skills`](https://github.com/vercel-labs/skills) (invoked as `npx skills`) is the canonical tool for *installing* skills from GitHub repos into a project. If that's all you need, use it — it has broader agent support and a larger ecosystem.
+`skillctl` is a CLI for maintaining a **personal library of Claude skills** and keeping it in sync with the projects where you actually use them.
 
-`skillctl` covers what `npx skills` doesn't: the **round-trip back to your library**. Push local edits back, detect skills you wrote locally and contribute them upstream, fork as a new skill on divergence, fork-locally on pull. A "skill" is any folder containing a `SKILL.md` file — the same definition `npx skills` uses, so libraries are interchangeable between the two tools.
+A *skill* is any folder containing a `SKILL.md` file — Claude reads it as instructions and context. `skillctl` treats skills as first-class artifacts you author, share across projects, and refine over time:
+
+- **One library, many projects.** Keep your skills in a single git repo. Install any subset into a project with `skillctl add`.
+- **Edits where they happen.** Tweak a skill in the heat of a project, then `skillctl push` to send the improvements back to the library.
+- **Local skills surfaced.** Wrote something new locally? `skillctl detect` finds it and contributes it upstream.
+- **Conflicts handled.** On divergence, choose overwrite, fork-as-new, fork-locally, or skip — per-skill, per-flow.
+
+The library stays the source of truth; your skills evolve where you use them.
+
+> Already using [`vercel-labs/skills`](https://github.com/vercel-labs/skills) (`npx skills`)? The two compose — same `SKILL.md` format, interoperable libraries. See [Using skillctl alongside `npx skills`](#using-skillctl-alongside-npx-skills) below.
 
 ## What it does
 
 | Flow                          | Direction         | Purpose                                                          |
 |-------------------------------|-------------------|------------------------------------------------------------------|
-| `push`                        | project → library | Diff local edits and commit them back.                           |
-| `detect`                      | project → library | Walk the project for new `SKILL.md` files and contribute them.   |
-| `push --on-divergence fork`   | project → library | Fork as a *new* library skill when local has diverged.           |
-| `pull`                        | library → project | Refresh installed skills; fork-locally on divergence.            |
 | `add`                         | library → project | Multi-select install with live filter; records `source_sha`.     |
 | `list`                        | library → ø       | Inventory with tags + descriptions.                              |
+| `push`                        | project → library | Diff local edits and commit them back.                           |
+| `pull`                        | library → project | Refresh installed skills; fork-locally on divergence.            |
+| `detect`                      | project → library | Walk the project for new `SKILL.md` files and contribute them.   |
+| `push --on-divergence fork`   | project → library | Fork as a *new* library skill when local has diverged.           |
 
 Plus `init` (link a library). Every multi-skill flow supports `--tag` filtering and `--json` for agents.
 
@@ -118,19 +127,19 @@ Stable exit codes: `0` success (incl. nothing-to-do), `1` generic, `2` config (m
 
 The full agent contract — flag matrix per command, JSON shapes, recipes, failure modes — lives in [`.claude/skills/skillctl-usage/SKILL.md`](.claude/skills/skillctl-usage/SKILL.md). It's installable into any project via `skillctl add` so the project's agent picks it up.
 
-## Comparison with `npx skills`
+## Using skillctl alongside `npx skills`
 
-If you only consume skills, `npx skills` is the right tool — broader agent support, larger ecosystem. `skillctl` is the contributor-side companion. What it adds on top:
+[`vercel-labs/skills`](https://github.com/vercel-labs/skills) (invoked as `npx skills`) is a popular tool for installing skills from public GitHub repos into a project. The two tools are designed to compose: they use the same `SKILL.md` definition and the same arbitrary-folder discovery, so libraries are interoperable. Use `npx skills` for one-way installs from public registries, and `skillctl` for round-trip management of your own library.
 
-| Feature                                        | `skillctl` | `npx skills` |
-|------------------------------------------------|:----------:|:------------:|
-| Install from a GitHub repo                     | ✓          | ✓            |
-| Push local edits back to the library           | ✓          | ✗            |
-| Detect new local skills and contribute upstream | ✓         | ✗            |
-| Fork-as-new on push divergence                 | ✓          | ✗            |
-| Fork-locally on pull divergence                | ✓          | ✗            |
-| Tag-based filtering across all flows           | ✓          | ✗            |
-| Stable `--json` + granular exit codes          | ✓          | ✗            |
+| Capability                                       | `skillctl` | `npx skills` |
+|--------------------------------------------------|:----------:|:------------:|
+| Install from a GitHub repo                       | ✓          | ✓            |
+| Push local edits back to the library             | ✓          | ✗            |
+| Detect new local skills and contribute upstream  | ✓          | ✗            |
+| Fork-as-new on push divergence                   | ✓          | ✗            |
+| Fork-locally on pull divergence                  | ✓          | ✗            |
+| Tag-based filtering across all flows             | ✓          | ✗            |
+| Stable `--json` output + granular exit codes     | ✓          | ✗            |
 
 ### Pain points it addresses
 
@@ -138,9 +147,7 @@ If you already use `npx skills`, you may have hit these:
 
 - **Local edits wiped on `npx skills update`** ([vercel-labs/skills#455](https://github.com/vercel-labs/skills/issues/455)) — `skillctl pull --on-divergence fork --fork-suffix local` renames your local copy as `<name>-local` and pulls the library version into the original destination. No choice between "lose edits" and "skip update".
 - **Hand-written local skills mixed into the install set** ([vercel-labs/skills#268](https://github.com/vercel-labs/skills/issues/268)) — `skillctl detect` walks the project for `SKILL.md` files not in `.skills.toml` and offers to contribute them to your library in one commit.
-- **No path to push library improvements you made in a project** — not in their tracker explicitly, but implicit in the issues above. `skillctl push` diffs each installed skill against the library at its `source_sha`, classifies the change, and commits + pushes the selected ones in a single library-side commit.
-
-The two tools are layout-compatible — same `SKILL.md` definition, same arbitrary-folder discovery — so you can use `npx skills` for installs and `skillctl` for round-trips on the same library.
+- **No path to push library improvements you made in a project** — `skillctl push` diffs each installed skill against the library at its `source_sha`, classifies the change, and commits + pushes the selected ones in a single library-side commit.
 
 ## Development
 
