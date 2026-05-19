@@ -10,6 +10,14 @@ homepage = "https://github.com/umanio-agency/skillctl"
 readme = "README.md"
 keywords = ["claude", "skills", "cli"]
 categories = ["command-line-utilities"]
+exclude = [
+    ".claude/**",
+    ".github/**",
+    "dist-workspace.toml",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+]
 
 [[bin]]
 name = "skillctl"

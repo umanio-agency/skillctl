@@ -4,3 +4,9 @@
 # `.skills.toml` is per-project install state written by `skillctl add`.
 # It belongs in consuming projects, not in this repo.
 .skills.toml
+
+# Locally-installed Claude skills that aren't part of skillctl itself
+# (project-internal companion skills are kept under their own folders).
+.claude/skills/*/
+!.claude/skills/skillctl-project/
+!.claude/skills/skillctl-usage/
