@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-11
+
+### Added
+
+- Published on crates.io: `cargo install skillctl` now works.
+- Pre-built binaries on GitHub Releases for macOS (x86_64, aarch64), Linux (x86_64, aarch64), and Windows (x86_64), built via [`cargo-dist`](https://github.com/astral-sh/dist).
+- Homebrew tap at [`umanio-agency/homebrew-tap`](https://github.com/umanio-agency/homebrew-tap): `brew install umanio-agency/homebrew-tap/skillctl`.
+- Shell + PowerShell `curl | sh`-style installers wired into the release workflow.
+
 ### Changed
 
 - Crate renamed from `skills-cli` to `skillctl` to publish on crates.io (the `skills-cli` crate name was already taken by an unrelated package).
