@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- README and crate description reframed around "agent skills" terminology to reflect the multi-tool nature of the `SKILL.md` convention (Claude Code, Codex, Cursor, OpenCode, and others in the [open agent skills ecosystem](https://skills.sh)) — no behavior change.
+
 ## [0.1.1] - 2026-05-11
 
 ### Added

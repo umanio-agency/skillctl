@@ -3,15 +3,15 @@
 [![CI](https://github.com/umanio-agency/skillctl/actions/workflows/ci.yml/badge.svg)](https://github.com/umanio-agency/skillctl/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> CLI to manage your personal library of Claude skills across projects. Binary: **`skillctl`**.
+> CLI to manage your personal library of agent skills across projects. Binary: **`skillctl`**.
 
 > Status: pre-v1, in active development.
 
 ## What this is
 
-`skillctl` is a CLI for maintaining a **personal library of Claude skills** and keeping it in sync with the projects where you actually use them.
+`skillctl` is a CLI for maintaining a **personal library of agent skills** and keeping it in sync with the projects where you actually use them.
 
-A *skill* is any folder containing a `SKILL.md` file — Claude reads it as instructions and context. `skillctl` treats skills as first-class artifacts you author, share across projects, and refine over time:
+A *skill* is any folder containing a `SKILL.md` file — read as instructions and context by agent tools in the [open agent skills ecosystem](https://skills.sh) (Claude Code, Codex, Cursor, OpenCode, and many more). `skillctl` treats skills as first-class artifacts you author, share across projects, and refine over time:
 
 - **One library, many projects.** Keep your skills in a single git repo. Install any subset into a project with `skillctl add`.
 - **Edits where they happen.** Tweak a skill in the heat of a project, then `skillctl push` to send the improvements back to the library.
