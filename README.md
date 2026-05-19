@@ -28,7 +28,31 @@ Plus `init` (link a library). Every multi-skill flow supports `--tag` filtering 
 
 ## Install
 
-Build from source:
+### Homebrew (macOS, Linux)
+
+```sh
+brew install umanio-agency/homebrew-tap/skillctl
+```
+
+### Cargo (any platform with Rust 1.85+)
+
+```sh
+cargo install skillctl
+```
+
+### `curl | sh` (macOS, Linux)
+
+```sh
+curl -LsSf https://github.com/umanio-agency/skillctl/releases/latest/download/skillctl-installer.sh | sh
+```
+
+### PowerShell (Windows)
+
+```powershell
+irm https://github.com/umanio-agency/skillctl/releases/latest/download/skillctl-installer.ps1 | iex
+```
+
+### From source
 
 ```sh
 git clone https://github.com/umanio-agency/skillctl.git
@@ -36,7 +60,7 @@ cd skillctl
 cargo install --path .
 ```
 
-Requires Rust 1.85+ (edition 2024) and a working `git` on `PATH`. The binary lands as `skillctl`.
+Any method gives you a `skillctl` binary on `PATH`. The `git` CLI is a runtime dependency (skillctl shells out to it).
 
 ## Quick start
 
