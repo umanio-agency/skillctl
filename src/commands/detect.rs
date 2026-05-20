@@ -16,6 +16,7 @@ use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
+use crate::path_safety::validate_relative_subpath;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
 use crate::ui;
@@ -284,13 +285,12 @@ fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> 
 
 fn resolve_target(args: &DetectArgs, ctx: &Context, library_root: &Path) -> Result<PathBuf> {
     if let Some(target) = &args.target {
-        if target.is_absolute() {
-            return Err(AppError::Config(format!(
-                "--target must be relative to the library root, got `{}`",
+        validate_relative_subpath(target).map_err(|e| {
+            AppError::Config(format!(
+                "invalid --target `{}`: {e} (must be a relative subpath of the library root)",
                 target.display()
             ))
-            .into());
-        }
+        })?;
         return Ok(target.clone());
     }
     if !ctx.interactive {
@@ -350,8 +350,8 @@ fn pick_library_destination(library_root: &Path) -> Result<PathBuf> {
                     if trimmed.is_empty() {
                         return Err("path cannot be empty");
                     }
-                    if Path::new(trimmed).is_absolute() {
-                        return Err("use a path relative to the library root");
+                    if validate_relative_subpath(Path::new(trimmed)).is_err() {
+                        return Err("use a relative subpath (no leading `/`, no `..`)");
                     }
                     Ok(())
                 })

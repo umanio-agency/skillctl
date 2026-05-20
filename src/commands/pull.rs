@@ -15,6 +15,7 @@ use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
+use crate::path_safety::safe_join;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill;
 use crate::ui;
@@ -269,8 +270,12 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         let installed_source_path = project_cfg.installed[apply.candidate_index]
             .source_path
             .clone();
-        let local_dir = cwd.join(&installed_destination);
-        let library_dir = library_root.join(&installed_source_path);
+        // Belt-and-suspenders: `installed.destination` and `installed.source_path`
+        // are validated at `project_config::load` time, but `safe_join` re-checks
+        // at the destructive call site to defend against any future code path
+        // that constructs `InstalledSkill` without going through load.
+        let local_dir = safe_join(&cwd, &installed_destination)?;
+        let library_dir = safe_join(&library_root, &installed_source_path)?;
 
         match &apply.op {
             ApplyOp::Pull => {
@@ -466,6 +471,9 @@ fn validate_fork_name(name: &str) -> std::result::Result<(), &'static str> {
     }
     if name.contains('/') || name.contains('\\') {
         return Err("name cannot contain `/` or `\\`");
+    }
+    if name == "." || name == ".." {
+        return Err("name cannot be `.` or `..`");
     }
     Ok(())
 }
