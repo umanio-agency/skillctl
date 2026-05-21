@@ -8,6 +8,7 @@ mod git;
 mod path_safety;
 mod project_config;
 mod prompt;
+mod sanitize;
 mod skill;
 mod ui;
 

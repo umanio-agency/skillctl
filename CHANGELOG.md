@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-21
+
+### Security
+
+Fix five additional vulnerabilities surfaced by a comprehensive multi-angle audit (six parallel sub-agents, each covering one threat-model dimension: command injection, input parsing, FS safety 2nd pass + concurrency, output safety + agent-mode JSON, supply chain, logic / state-machine). These were independent of the firebaguette audit that motivated v0.1.2; together they close every CRITICAL and offensive HIGH finding identified by the audit.
+
+- **`source_sha` argument injection in `git ls-tree`** (CRITICAL, four agents converged on this). `InstalledSkill.source_sha` deserialized from `.skills.toml` (committed, PR-mergeable) flowed unvalidated into `git ls-tree -r -z <refspec> -- <path>`. Because the refspec sits before `--`, an attacker who slipped a malicious `.skills.toml` into a PR could set `source_sha = "--name-only"` / `--abbrev=0` / `--output=…` and corrupt the diff classifier — which drives `pull`/`push` destructive decisions — or forge divergence state to trick `push --on-divergence overwrite` into clobbering the wrong content. `InstalledSkill::validate` now rejects any `source_sha` that isn't 40–64 hex characters (sha1 / sha256).
+- **FIFO / device / socket DoS in `copy_dir_all`** (CRITICAL). The file-type branch only checked `is_dir()` / `is_symlink()`; a FIFO inside a skill folder fell through to `fs::copy`, which blocks indefinitely waiting for a writer. A character device like `/dev/zero` would read until OOM. Now `copy_dir_all` only allows regular files and directories; anything else (FIFO, socket, device) is rejected with `AppError::Config`.
+- **`add --dest` arbitrary-directory wipe in agent mode** (HIGH). `--dest` accepted absolute paths and `..` traversal without validation, so `skillctl add --dest /Users/victim/.ssh --on-conflict overwrite --skill <maliciously-named>` would wipe arbitrary directories in one shot from any agent-driven invocation. Now `--dest` rejects `..` unconditionally, and rejects absolute paths when running in non-interactive / `--json` mode (where the operator may be an LLM running on attacker-supplied input). Interactive use is unchanged.
+- **Commit-message trailer forgery via skill names** (HIGH). Skill names were spliced verbatim into `git commit -m "update skill: <name>"` and into the `commit.message` field of `--json` output. A library skill with a `\n` in its name (e.g. `foo\nCo-Authored-By: evil@x`) produced a forged trailer that downstream tooling (Linear, GitHub commit-bot, release-notes scrapers) would treat as real authorship metadata. The new `sanitize` module strict-validates every `name` / `tag` (identifier-class: no control bytes, no newlines, no ESC) and lenient-validates `description` / `--message` (allows `\n`/`\t`, rejects `\r` / DEL / C0+C1 controls). Skills with poisoned names are dropped silently from `discover` (a poisoned name can't be safely displayed either); poisoned tags or descriptions are stripped from otherwise-valid skills.
+- **Hardlink exfiltration via the round-trip** (HIGH). `fs::symlink_metadata` reports a regular file for hardlinks (shared inode), and `fs::copy` reads the target content. An untrusted agent writing `<project>/my-skill/data` as a hardlink to `~/.ssh/id_rsa` would have shipped the SSH key content to the library on the next `skillctl push` or `detect`. `copy_dir_all` now checks `nlink() > 1` on regular files (Unix) and refuses to copy hardlinked content with the same fail-closed philosophy as symlinks.
+
+Audit methodology and the full remaining backlog (10 MEDIUM + 18 LOW spread across atomicity, concurrency, output hardening, supply chain documentation) are tracked privately and will be addressed in 0.1.4 / 0.1.5. 23 new unit + integration tests cover each rejection class; `cargo test`: 95 pass; clippy clean; `cargo audit` clean.
+
 ## [0.1.2] - 2026-05-20
 
 ### Security

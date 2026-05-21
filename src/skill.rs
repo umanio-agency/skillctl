@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 
+use crate::sanitize::{validate_identifier, validate_message_safe};
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Skill {
     pub path: PathBuf,
@@ -41,9 +43,24 @@ pub fn discover(root: &Path) -> Result<Vec<Skill>> {
         let raw = std::fs::read_to_string(skill_md)
             .with_context(|| format!("reading {}", skill_md.display()))?;
         let (name, description, tags) = parse_frontmatter(&raw);
+        let resolved_name = name.unwrap_or_else(|| folder_name.clone());
+        // Sanitisation at the discovery boundary: a malicious library may
+        // smuggle control bytes or ANSI escapes into `name`, `description`,
+        // or `tags`, all of which flow into terminal logs, JSON output, and
+        // commit messages. Skills with an invalid name are silently dropped
+        // (we cannot safely display them either); descriptions and tags
+        // that fail validation are stripped from the otherwise-valid skill.
+        if validate_identifier("skill name", &resolved_name).is_err() {
+            continue;
+        }
+        let description = description.filter(|d| validate_message_safe("description", d).is_ok());
+        let tags: Vec<String> = tags
+            .into_iter()
+            .filter(|t| validate_identifier("tag", t).is_ok())
+            .collect();
         skills.push(Skill {
             path: folder,
-            name: name.unwrap_or(folder_name),
+            name: resolved_name,
             description,
             tags,
         });
@@ -168,7 +185,13 @@ pub fn read_tags(skill_md: &Path) -> Result<Vec<String>> {
     let raw = std::fs::read_to_string(skill_md)
         .with_context(|| format!("reading {}", skill_md.display()))?;
     let (_, _, tags) = parse_frontmatter(&raw);
-    Ok(tags)
+    // Mirror the sanitisation in `discover`: filter out tags with control
+    // bytes so a malicious local SKILL.md cannot inject ANSI/OSC-8 into
+    // tag-matching errors or `--json` output.
+    Ok(tags
+        .into_iter()
+        .filter(|t| validate_identifier("tag", t).is_ok())
+        .collect())
 }
 
 fn clean_value(raw: &str) -> String {
@@ -319,5 +342,86 @@ mod tests {
         let (_, desc, tags) = parse_frontmatter(raw);
         assert_eq!(desc.as_deref(), Some("body line 1\nbody line 2"));
         assert_eq!(tags, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    use tempfile::TempDir;
+
+    fn write_skill(root: &std::path::Path, folder: &str, frontmatter: &str) {
+        let dir = root.join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), format!("{frontmatter}\n\n# body\n")).unwrap();
+    }
+
+    #[test]
+    fn discover_drops_skills_with_control_chars_in_name() {
+        let lib = TempDir::new().unwrap();
+        write_skill(
+            lib.path(),
+            "ok-skill",
+            "---\nname: clean\ndescription: fine\n---",
+        );
+        // Newline in name would forge commit trailers; ANSI escape would
+        // hijack the terminal. Both must be dropped silently.
+        write_skill(
+            lib.path(),
+            "evil-newline",
+            "---\nname: \"foo\\nCo-Authored-By: evil\"\n---",
+        );
+        // Note: the parser strips wrapping quotes but leaves the literal `\n`
+        // characters from the YAML source. To get a real LF in the parsed
+        // name, the SKILL.md must contain a real LF — write that directly.
+        let evil_dir = lib.path().join("evil-literal");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(
+            evil_dir.join("SKILL.md"),
+            "---\nname: foo\u{1b}[31mBAD\u{1b}[0m\n---\n",
+        )
+        .unwrap();
+
+        let skills = discover(lib.path()).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"clean"));
+        assert!(
+            !names.iter().any(|n| n.contains('\u{1b}')),
+            "ANSI-poisoned skill must be dropped, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn discover_strips_bad_tags_keeps_skill() {
+        let lib = TempDir::new().unwrap();
+        let dir = lib.path().join("foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Block-form tags: one clean, one with ESC.
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: foo\ntags:\n  - clean\n  - \"bad\u{1b}[31m\"\n---\n",
+        )
+        .unwrap();
+
+        let skills = discover(lib.path()).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "foo");
+        assert_eq!(skills[0].tags, vec!["clean".to_string()]);
+    }
+
+    #[test]
+    fn discover_strips_bad_description_keeps_skill() {
+        let lib = TempDir::new().unwrap();
+        let dir = lib.path().join("foo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: foo\ndescription: hello\u{1b}[31mEVIL\n---\n",
+        )
+        .unwrap();
+
+        let skills = discover(lib.path()).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "foo");
+        assert!(
+            skills[0].description.is_none(),
+            "ANSI-poisoned description should be stripped"
+        );
     }
 }

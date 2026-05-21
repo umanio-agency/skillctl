@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::path_safety::validate_relative_subpath;
+use crate::sanitize::validate_identifier;
 
 const FILENAME: &str = ".skills.toml";
 
@@ -33,6 +34,22 @@ impl InstalledSkill {
     /// deleting arbitrary directories on a maintainer's machine, or read
     /// outside the library cache on the library side.
     pub fn validate(&self) -> Result<(), AppError> {
+        // `name` is single-line and ends up in commit subjects and terminal
+        // output — strict identifier check.
+        validate_identifier("name in .skills.toml", &self.name)?;
+
+        // `source_sha` is later passed as a positional refspec to `git ls-tree
+        // <refspec> -- <path>` (which sits before `--` in the argv). Without
+        // validation, a value starting with `-` becomes a git flag, corrupting
+        // the diff classifier and the downstream `pull`/`push` destructive
+        // choices. Lock it down to hex (sha1: 40 chars, sha256: 64 chars).
+        if !is_hex_sha(&self.source_sha) {
+            return Err(AppError::Config(format!(
+                "invalid source_sha for skill `{}` in .skills.toml: expected 40-64 hex characters, got `{}`",
+                self.name, self.source_sha
+            )));
+        }
+
         validate_relative_subpath(&self.source_path).map_err(|e| {
             AppError::Config(format!(
                 "invalid source_path for skill `{}` in .skills.toml: {e}",
@@ -47,6 +64,13 @@ impl InstalledSkill {
         })?;
         Ok(())
     }
+}
+
+fn is_hex_sha(s: &str) -> bool {
+    let len = s.len();
+    (40..=64).contains(&len)
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b))
 }
 
 pub fn path(project_root: &Path) -> PathBuf {
@@ -79,11 +103,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const VALID_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn make_skill(name: &str, source_path: &str, destination: &str) -> InstalledSkill {
         InstalledSkill {
             name: name.to_string(),
             source_path: PathBuf::from(source_path),
-            source_sha: "deadbeef".to_string(),
+            source_sha: VALID_SHA.to_string(),
             destination: PathBuf::from(destination),
             installed_at: "2026-05-20T00:00:00Z".to_string(),
         }
@@ -133,7 +159,7 @@ mod tests {
 [[installed]]
 name = "evil"
 source_path = "skills/evil"
-source_sha = "deadbeef"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
 destination = "/home/seb/.ssh"
 installed_at = "2026-05-20T00:00:00Z"
 "#;
@@ -152,7 +178,7 @@ installed_at = "2026-05-20T00:00:00Z"
 [[installed]]
 name = "evil"
 source_path = "../../../etc"
-source_sha = "deadbeef"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
 destination = ".claude/skills/evil"
 installed_at = "2026-05-20T00:00:00Z"
 "#;
@@ -165,13 +191,63 @@ installed_at = "2026-05-20T00:00:00Z"
     }
 
     #[test]
+    fn validate_rejects_non_hex_source_sha() {
+        let mut s = make_skill("foo", "skills/foo", ".claude/skills/foo");
+        s.source_sha = "--name-only".to_string();
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("source_sha"));
+        assert!(err.contains("hex"));
+    }
+
+    #[test]
+    fn validate_rejects_too_short_source_sha() {
+        let mut s = make_skill("foo", "skills/foo", ".claude/skills/foo");
+        s.source_sha = "deadbeef".to_string();
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_too_long_source_sha() {
+        let mut s = make_skill("foo", "skills/foo", ".claude/skills/foo");
+        s.source_sha = "a".repeat(65);
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_sha1_and_sha256() {
+        let mut s = make_skill("foo", "skills/foo", ".claude/skills/foo");
+        s.source_sha = "a".repeat(40); // sha1
+        assert!(s.validate().is_ok());
+        s.source_sha = "a".repeat(64); // sha256
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_newline_in_name() {
+        let s = make_skill(
+            "foo\nCo-Authored-By: evil",
+            "skills/foo",
+            ".claude/skills/foo",
+        );
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("name"));
+        assert!(err.contains("control character"));
+    }
+
+    #[test]
+    fn validate_rejects_ansi_in_name() {
+        let s = make_skill("\x1b[31mEVIL\x1b[0m", "skills/foo", ".claude/skills/foo");
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
     fn load_accepts_well_formed_skills_toml() {
         let work = TempDir::new().unwrap();
         let raw = r#"
 [[installed]]
 name = "foo"
 source_path = "skills/foo"
-source_sha = "abc123"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
 destination = ".claude/skills/foo"
 installed_at = "2026-05-20T00:00:00Z"
 "#;

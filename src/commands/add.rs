@@ -266,6 +266,27 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
 
 fn resolve_destination(args: &AddArgs, ctx: &Context, cwd: &std::path::Path) -> Result<PathBuf> {
     if let Some(dest) = &args.dest {
+        // Reject parent traversal unconditionally — there is no legitimate
+        // workflow that needs `..` in `--dest`. Reject absolute paths in
+        // non-interactive mode (agent-mode threat model: flag values may be
+        // attacker-supplied via the agent's prompt). In interactive mode the
+        // operator is typing the value themselves, so absolute is allowed.
+        for component in dest.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(AppError::Config(format!(
+                    "invalid --dest `{}`: parent traversal (`..`) is not allowed",
+                    dest.display()
+                ))
+                .into());
+            }
+        }
+        if dest.is_absolute() && !ctx.interactive {
+            return Err(AppError::Config(format!(
+                "invalid --dest `{}`: absolute paths are not allowed in non-interactive mode (the operator's flag values may be agent-supplied; use a path relative to the current directory)",
+                dest.display()
+            ))
+            .into());
+        }
         return Ok(dest.clone());
     }
     if !ctx.interactive {

@@ -19,6 +19,7 @@ use crate::fs_util;
 use crate::git;
 use crate::path_safety::safe_join;
 use crate::project_config::{self, InstalledSkill};
+use crate::sanitize::validate_message_safe;
 use crate::skill;
 use crate::ui;
 
@@ -79,6 +80,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             "--on-divergence fork requires --fork-suffix in non-interactive mode".into(),
         )
         .into());
+    }
+
+    // Reject CRLF / ESC / NUL etc. in user-supplied commit message. The body
+    // can be multi-line (LF is fine) but a `\r\n` would let an agent forge
+    // commit trailers (`Co-Authored-By:`, etc.) that downstream bots trust.
+    if let Some(msg) = &args.message {
+        validate_message_safe("--message", msg)?;
     }
 
     let cfg = config::load()?;
