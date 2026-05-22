@@ -17,7 +17,7 @@ use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::lock;
-use crate::path_safety::validate_relative_subpath;
+use crate::path_safety::{normalize_lexical, validate_relative_subpath};
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
 use crate::ui;
@@ -59,18 +59,33 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
     let mut project_cfg = project_config::load(&cwd)?;
 
+    // Dedup keys for "already tracked in .skills.toml". Use BOTH the
+    // canonical and the lexical path: canonical handles symlinks and
+    // NFD/NFC variants on macOS when the destination exists; lexical
+    // covers the case where a tracked destination was deleted from disk
+    // (otherwise an attacker who removed `.claude/skills/foo/` and dropped
+    // a malicious replacement at the same path would have it re-detected
+    // as a new skill on the next `detect`).
     let installed_canonical: HashSet<PathBuf> = project_cfg
         .installed
         .iter()
         .filter_map(|i| std::fs::canonicalize(cwd.join(&i.destination)).ok())
         .collect();
+    let installed_lexical: HashSet<PathBuf> = project_cfg
+        .installed
+        .iter()
+        .map(|i| normalize_lexical(&cwd.join(&i.destination)))
+        .collect();
 
-    let local_skills = skill::discover(&cwd)?;
+    let local_skills = skill::discover(&cwd, args.include_vendored)?;
     let new_skills: Vec<Skill> = local_skills
         .into_iter()
-        .filter(|s| match std::fs::canonicalize(&s.path) {
-            Ok(c) => !installed_canonical.contains(&c),
-            Err(_) => true,
+        .filter(|s| {
+            let canonical_match = std::fs::canonicalize(&s.path)
+                .ok()
+                .is_some_and(|c| installed_canonical.contains(&c));
+            let lexical_match = installed_lexical.contains(&normalize_lexical(&s.path));
+            !canonical_match && !lexical_match
         })
         .collect();
 

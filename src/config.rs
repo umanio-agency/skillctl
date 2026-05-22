@@ -58,6 +58,31 @@ pub fn save(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Strip an embedded `user[:password]@` userinfo from an HTTPS URL so the
+/// stored `Library::url` (echoed in `config.toml`, `--json` output, error
+/// chains, and CI logs) cannot leak personal access tokens. URLs without
+/// userinfo (SSH `git@host:path` form, `ssh://`, or plain HTTPS) are
+/// returned unchanged — for `ssh://git@host/...` the `git@` is the SSH login
+/// user, not a credential, so we leave SSH alone.
+pub fn sanitize_url_for_display(url: &str) -> String {
+    if url.starts_with("git@") || url.starts_with("ssh://") {
+        return url.to_string();
+    }
+    for prefix in ["https://", "http://"] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = &rest[..authority_end];
+            if let Some(at) = authority.find('@') {
+                let stripped_authority = &authority[at + 1..];
+                let remainder = &rest[authority_end..];
+                return format!("{prefix}{stripped_authority}{remainder}");
+            }
+            return url.to_string();
+        }
+    }
+    url.to_string()
+}
+
 /// Derive a stable cache folder name from a GitHub URL: `owner-repo`.
 fn slug_for_url(url: &str) -> Result<String> {
     let trimmed = url.trim().trim_end_matches('/').trim_end_matches(".git");
@@ -85,7 +110,53 @@ fn slug_for_url(url: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::slug_for_url;
+    use super::{sanitize_url_for_display, slug_for_url};
+
+    #[test]
+    fn sanitize_strips_x_access_token() {
+        assert_eq!(
+            sanitize_url_for_display(
+                "https://x-access-token:ghp_abcdefghijklmnop@github.com/foo/bar"
+            ),
+            "https://github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_user_password() {
+        assert_eq!(
+            sanitize_url_for_display("https://alice:hunter2@github.com/foo/bar.git"),
+            "https://github.com/foo/bar.git"
+        );
+    }
+
+    #[test]
+    fn sanitize_leaves_ssh_alone() {
+        assert_eq!(
+            sanitize_url_for_display("git@github.com:foo/bar.git"),
+            "git@github.com:foo/bar.git"
+        );
+        assert_eq!(
+            sanitize_url_for_display("ssh://git@github.com/foo/bar"),
+            "ssh://git@github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn sanitize_noop_on_clean_https() {
+        assert_eq!(
+            sanitize_url_for_display("https://github.com/foo/bar"),
+            "https://github.com/foo/bar"
+        );
+    }
+
+    #[test]
+    fn sanitize_does_not_strip_at_in_path() {
+        assert_eq!(
+            sanitize_url_for_display("https://github.com/foo/bar@v1"),
+            "https://github.com/foo/bar@v1"
+        );
+    }
 
     #[test]
     fn slug_https() {

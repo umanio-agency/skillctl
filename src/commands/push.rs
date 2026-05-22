@@ -20,7 +20,7 @@ use crate::git;
 use crate::lock;
 use crate::path_safety::safe_join;
 use crate::project_config::{self, InstalledSkill};
-use crate::sanitize::validate_message_safe;
+use crate::sanitize::{validate_fork_name, validate_message_safe};
 use crate::skill;
 use crate::ui;
 
@@ -337,12 +337,18 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
-    for apply in &applies {
+    // Per-skill apply with continue-on-error. If one skill's
+    // `replace_folder_contents` or `git add` fails, we (a) log a warning,
+    // (b) restore the library cache's working tree for that path via
+    // `git checkout HEAD -- <library_relative>` so the cache stays in sync
+    // with HEAD, (c) drop the failed apply from the list, and (d) continue
+    // with the remaining skills. This keeps a single bad skill (e.g. one
+    // whose local copy contains a fresh hardlink) from aborting an entire
+    // multi-skill push and orphaning the cache mid-batch.
+    let mut applies_kept: Vec<Apply> = Vec::with_capacity(applies.len());
+    for apply in applies {
         let installed = &project_cfg.installed[apply.candidate_index];
-        // Belt-and-suspenders: `installed.destination` and `installed.source_path`
-        // are already validated at `project_config::load` time, but `safe_join`
-        // re-checks at the destructive call site to defend against any future
-        // code path that constructs `InstalledSkill` without going through load.
+        let installed_name = installed.name.clone();
         let local_dir = safe_join(&cwd, &installed.destination)?;
         let (library_dir, library_relative) = match &apply.op {
             ApplyOp::Update => (
@@ -356,8 +362,42 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 new_library_path.clone(),
             ),
         };
-        fs_util::replace_folder_contents(&local_dir, &library_dir)?;
-        git::add_all(&library_root, &library_relative).map_err(|e| AppError::Git(e.to_string()))?;
+        let outcome: Result<()> = (|| {
+            fs_util::replace_folder_contents(&local_dir, &library_dir)?;
+            git::add_all(&library_root, &library_relative)
+                .map_err(|e| AppError::Git(e.to_string()))?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => applies_kept.push(apply),
+            Err(e) => {
+                let _ = ui::log_warning(
+                    ctx,
+                    format!("push failed for `{installed_name}`: {e}; rolling back partial work"),
+                );
+                if let Err(cleanup_err) = git::checkout_paths(&library_root, &library_relative) {
+                    let _ = ui::log_warning(
+                        ctx,
+                        format!(
+                            "could not roll back `{}` in library cache: {cleanup_err}",
+                            library_relative.display()
+                        ),
+                    );
+                }
+                results.push(json!({
+                    "name": installed_name,
+                    "status": "failed",
+                    "reason": e.to_string(),
+                }));
+            }
+        }
+    }
+    let applies = applies_kept;
+
+    if applies.is_empty() {
+        ui::outro(ctx, "nothing pushed (all selected skills failed to apply)")?;
+        emit_json(ctx, &results, None);
+        return Ok(());
     }
 
     if !git::has_staged_changes(&library_root).map_err(|e| AppError::Git(e.to_string()))? {
@@ -632,19 +672,6 @@ fn resolve_fork_op(
         candidate
     };
     fork_op_for_name(installed, library_root, &new_name)
-}
-
-fn validate_fork_name(name: &str) -> std::result::Result<(), &'static str> {
-    if name.is_empty() {
-        return Err("name cannot be empty");
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err("name cannot contain `/` or `\\`");
-    }
-    if name == "." || name == ".." {
-        return Err("name cannot be `.` or `..`");
-    }
-    Ok(())
 }
 
 fn fork_op_for_name(

@@ -19,3 +19,9 @@ Please do not open a public issue for security reports. We aim to acknowledge wi
 ## Supported versions
 
 The project is pre-v1; only the `main` branch is supported and security fixes land there. Once v1 ships, this section will document the supported release range.
+
+## Install channel hygiene
+
+- **Homebrew:** always use the fully-qualified tap name — `brew install umanio-agency/homebrew-tap/skillctl`. Homebrew taps are namespaced by their GitHub owner, and anyone can create a `homebrew-tap` repo and publish a `skillctl.rb` formula. Pinning the owner (`umanio-agency`) prevents typo-squat attacks where a malicious tap is added before the official one.
+- **crates.io:** the published crate is `skillctl` (owner: `pinho.dcj@gmail.com`). The historical name `skills-cli` is owned by an unrelated third party and is **not** affiliated with this project.
+- **Direct binaries:** the `curl | sh` and PowerShell installers serve assets from `github.com/umanio-agency/skillctl/releases/latest/download/…` and verify SHA-256 sums published alongside each release.

@@ -47,6 +47,30 @@ pub fn safe_join(base: &Path, untrusted: impl AsRef<Path>) -> Result<PathBuf, Ap
     Ok(base.join(untrusted))
 }
 
+/// Lexically normalise a path: collapse `./` and resolve `..` components
+/// without touching the filesystem. Used by callers that want a stable
+/// dedup key for paths that may or may not exist on disk (so
+/// `fs::canonicalize` can't be used uniformly).
+///
+/// Note: this is purely string-level. `a/b/../c` becomes `a/c`, but if
+/// `a/b` is a symlink to elsewhere, the lexical and physical paths
+/// diverge. Use only for dedup, never for trust decisions.
+pub fn normalize_lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(Component::ParentDir);
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +164,37 @@ mod tests {
     fn safe_join_with_empty_returns_base() {
         let joined = safe_join(Path::new("/tmp/base"), "").unwrap();
         assert_eq!(joined, Path::new("/tmp/base"));
+    }
+
+    #[test]
+    fn normalize_collapses_curdir() {
+        assert_eq!(
+            normalize_lexical(Path::new("./foo/./bar")),
+            PathBuf::from("foo/bar")
+        );
+    }
+
+    #[test]
+    fn normalize_resolves_parent_internally() {
+        assert_eq!(
+            normalize_lexical(Path::new("foo/bar/../baz")),
+            PathBuf::from("foo/baz")
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_absolute_root() {
+        assert_eq!(
+            normalize_lexical(Path::new("/tmp/foo/../bar")),
+            PathBuf::from("/tmp/bar")
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_excess_parents() {
+        assert_eq!(
+            normalize_lexical(Path::new("../escape")),
+            PathBuf::from("../escape")
+        );
     }
 }

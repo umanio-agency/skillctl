@@ -37,7 +37,7 @@ pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
         eprintln!("warning: could not refresh library cache ({e}); using cached version");
     }
 
-    let skills = skill::discover(&repo)?;
+    let skills = skill::discover(&repo, false)?;
     let filtered: Vec<_> = skills
         .into_iter()
         .filter(|s| matches_tags(&s.tags, &args.tags, args.all_tags))

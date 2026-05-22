@@ -43,6 +43,8 @@ Plus `init` (link a library). Every multi-skill flow supports `--tag` filtering 
 brew install umanio-agency/homebrew-tap/skillctl
 ```
 
+Always use the **fully-qualified** form above — `<tap-owner>/<tap-repo>/skillctl`. The unqualified `brew install skillctl` would resolve to whichever tap is currently active in your Homebrew installation, and anyone can create a `homebrew-tap` repo under their own GitHub user and ship a `skillctl.rb` formula. Pinning the tap owner (`umanio-agency`) avoids that typo-squat risk.
+
 ### Cargo (any platform with Rust 1.85+)
 
 ```sh

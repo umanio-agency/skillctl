@@ -190,6 +190,13 @@ pub struct DetectArgs {
     /// `skills`, or `.claude/skills`). Required in non-interactive mode.
     #[arg(long, value_name = "PATH")]
     pub target: Option<PathBuf>,
+
+    /// Also walk paths normally ignored by `.gitignore` (e.g.
+    /// `node_modules/`, `vendor/`, `Pods/`). By default `detect` respects
+    /// the project's `.gitignore` so a `SKILL.md` smuggled inside a
+    /// third-party dependency cannot be silently shipped to the library.
+    #[arg(long)]
+    pub include_vendored: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

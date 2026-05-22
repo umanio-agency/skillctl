@@ -18,6 +18,7 @@ use crate::git;
 use crate::lock;
 use crate::path_safety::safe_join;
 use crate::project_config::{self, InstalledSkill};
+use crate::sanitize::validate_fork_name;
 use crate::skill;
 use crate::ui;
 
@@ -491,19 +492,6 @@ fn resolve_local_fork_op(
     Ok(ApplyOp::ForkLocal {
         local_fork_name: new_name,
     })
-}
-
-fn validate_fork_name(name: &str) -> std::result::Result<(), &'static str> {
-    if name.is_empty() {
-        return Err("name cannot be empty");
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err("name cannot contain `/` or `\\`");
-    }
-    if name == "." || name == ".." {
-        return Err("name cannot be `.` or `..`");
-    }
-    Ok(())
 }
 
 fn local_fork_destination(installed: &InstalledSkill, cwd: &Path, name: &str) -> PathBuf {

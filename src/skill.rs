@@ -13,14 +13,33 @@ pub struct Skill {
     pub tags: Vec<String>,
 }
 
-pub fn discover(root: &Path) -> Result<Vec<Skill>> {
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .filter_entry(|e| {
+/// Walk `root` for skills (folders containing a `SKILL.md`).
+///
+/// `include_vendored=false` (the safe default for project-side discovery):
+/// respects `.gitignore` / global ignore / `.ignore`, and additionally
+/// hard-skips `node_modules` / `target` folders. A malicious npm package
+/// that ships its own `SKILL.md` under `node_modules/...` cannot be
+/// detected and uploaded to the library by an automated `skillctl detect`
+/// (e.g. running in CI) unless the operator explicitly opts in.
+///
+/// `include_vendored=true`: walks every directory regardless of ignore
+/// files. Use only when the operator has typed the flag themselves.
+pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
+    let mut builder = WalkBuilder::new(root);
+    builder.hidden(false);
+    if include_vendored {
+        builder
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .ignore(false);
+    } else {
+        builder.filter_entry(|e| {
             let name = e.file_name();
             name != "node_modules" && name != "target"
-        })
-        .build();
+        });
+    }
+    let walker = builder.build();
     let mut skills = Vec::new();
     for entry in walker {
         let entry = entry.context("walking the library tree")?;
@@ -94,22 +113,35 @@ pub fn find_skills_folders(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// Maximum number of lines we will read inside a YAML frontmatter block
+/// before assuming the closing `---` fence is missing or the file is
+/// adversarial. Without this cap, a SKILL.md with an opening `---` but no
+/// closer would force the parser to scan the entire (potentially multi-GiB)
+/// body — a cheap DoS.
+const MAX_FRONTMATTER_LINES: usize = 200;
+
 /// Extract `name`, `description`, and `tags` from a leading YAML-style
 /// frontmatter block. Tolerant by design — single-line values are parsed,
 /// `description:` accepts both inline values and YAML block scalars (`|`
 /// literal, `>` folded), `tags:` accepts both the inline array form
 /// (`[a, b, c]`) and the block form (subsequent indented `- item` lines),
 /// and any other key is ignored.
+///
+/// Returns `(None, None, vec![])` (i.e. "no frontmatter") if the opening
+/// `---` is missing OR if the closing `---` is not seen within
+/// [`MAX_FRONTMATTER_LINES`] lines.
 fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>) {
-    let mut lines = raw.lines().peekable();
+    let mut lines = raw.lines().take(MAX_FRONTMATTER_LINES + 1).peekable();
     if lines.next().map(str::trim) != Some("---") {
         return (None, None, Vec::new());
     }
     let mut name = None;
     let mut description = None;
     let mut tags = Vec::new();
+    let mut saw_closing = false;
     while let Some(line) = lines.next() {
         if line.trim() == "---" {
+            saw_closing = true;
             break;
         }
         if let Some(rest) = line.strip_prefix("name:") {
@@ -172,6 +204,12 @@ fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>)
                 tags = parse_tags_inline(trimmed);
             }
         }
+    }
+    if !saw_closing {
+        // Unterminated frontmatter: treat the file as having no frontmatter
+        // at all rather than half-parsed metadata. Either the file is
+        // malformed (operator edit) or adversarial (DoS via unbounded body).
+        return (None, None, Vec::new());
     }
     (name, description, tags)
 }
@@ -378,7 +416,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(lib.path()).unwrap();
+        let skills = discover(lib.path(), false).unwrap();
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"clean"));
         assert!(
@@ -399,10 +437,91 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(lib.path()).unwrap();
+        let skills = discover(lib.path(), false).unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "foo");
         assert_eq!(skills[0].tags, vec!["clean".to_string()]);
+    }
+
+    #[test]
+    fn discover_skips_node_modules_by_default() {
+        let work = TempDir::new().unwrap();
+        write_skill(work.path(), "ok-skill", "---\nname: ok\n---");
+        let evil_dir = work.path().join("node_modules/evil-pkg");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(evil_dir.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
+
+        let skills = discover(work.path(), false).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"ok"));
+        assert!(
+            !names.contains(&"evil"),
+            "node_modules SKILL.md must not be detected without --include-vendored: {names:?}"
+        );
+    }
+
+    #[test]
+    fn discover_walks_node_modules_when_include_vendored() {
+        let work = TempDir::new().unwrap();
+        let evil_dir = work.path().join("node_modules/evil-pkg");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        std::fs::write(evil_dir.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
+
+        let skills = discover(work.path(), true).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"evil"),
+            "with --include-vendored, node_modules is walked: {names:?}"
+        );
+    }
+
+    #[test]
+    fn discover_respects_gitignore_by_default() {
+        let work = TempDir::new().unwrap();
+        std::fs::create_dir_all(work.path().join(".git")).unwrap();
+        std::fs::write(work.path().join(".gitignore"), "vendor/\n").unwrap();
+        write_skill(work.path(), "ok-skill", "---\nname: ok\n---");
+        let vendor_skill = work.path().join("vendor/foo");
+        std::fs::create_dir_all(&vendor_skill).unwrap();
+        std::fs::write(vendor_skill.join("SKILL.md"), "---\nname: vendored\n---\n").unwrap();
+
+        let skills = discover(work.path(), false).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"ok"));
+        assert!(
+            !names.contains(&"vendored"),
+            ".gitignore must be respected by default: {names:?}"
+        );
+    }
+
+    #[test]
+    fn unterminated_frontmatter_is_treated_as_none() {
+        // Opening `---` with no closing fence within MAX_FRONTMATTER_LINES.
+        // Without the cap this would scan the entire body — here we build a
+        // large enough body to exceed the cap.
+        let mut raw = String::from("---\nname: foo\n");
+        for i in 0..(MAX_FRONTMATTER_LINES + 50) {
+            raw.push_str(&format!("filler-{i}\n"));
+        }
+        let (name, desc, tags) = parse_frontmatter(&raw);
+        assert!(
+            name.is_none(),
+            "name from unterminated frontmatter must be dropped"
+        );
+        assert!(desc.is_none());
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn frontmatter_within_cap_parses_normally() {
+        // 50 ignored keys, well under the 200-line cap.
+        let mut raw = String::from("---\nname: foo\n");
+        for i in 0..50 {
+            raw.push_str(&format!("ignored_key_{i}: {i}\n"));
+        }
+        raw.push_str("---\n");
+        let (name, _, _) = parse_frontmatter(&raw);
+        assert_eq!(name.as_deref(), Some("foo"));
     }
 
     #[test]
@@ -416,7 +535,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(lib.path()).unwrap();
+        let skills = discover(lib.path(), false).unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "foo");
         assert!(

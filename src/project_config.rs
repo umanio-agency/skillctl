@@ -10,13 +10,21 @@ use crate::sanitize::validate_identifier;
 
 const FILENAME: &str = ".skills.toml";
 
+/// Hard cap on the number of `[[installed]]` entries we will load from a
+/// `.skills.toml`. A malicious PR could otherwise bury 1M entries that each
+/// trigger a `safe_join` + git fetch path, OOM'ing the diff classifier.
+/// 256 is comfortably above any realistic library size.
+const MAX_INSTALLED_ENTRIES: usize = 256;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default)]
     pub installed: Vec<InstalledSkill>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstalledSkill {
     pub name: String,
     pub source_path: PathBuf,
@@ -85,8 +93,42 @@ pub fn load(project_root: &Path) -> Result<ProjectConfig> {
     let raw = fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
     let cfg: ProjectConfig =
         toml::from_str(&raw).with_context(|| format!("parsing {}", p.display()))?;
+    if cfg.installed.len() > MAX_INSTALLED_ENTRIES {
+        return Err(AppError::Config(format!(
+            "{} has {} `[[installed]]` entries (cap is {}); refusing to load",
+            p.display(),
+            cfg.installed.len(),
+            MAX_INSTALLED_ENTRIES
+        ))
+        .into());
+    }
+    // Per-entry path + name + sha validation.
     for installed in &cfg.installed {
         installed.validate()?;
+    }
+    // Duplicate detection: two entries with the same `name` or same
+    // `destination` would make every command ambiguous (which one wins?).
+    // Better to refuse loading and let the operator de-dup by hand than to
+    // silently keep one and drop the other.
+    for i in 0..cfg.installed.len() {
+        for j in (i + 1)..cfg.installed.len() {
+            if cfg.installed[i].name == cfg.installed[j].name {
+                return Err(AppError::Config(format!(
+                    "{} has duplicate `[[installed]]` entries with name `{}`; remove the older one",
+                    p.display(),
+                    cfg.installed[i].name
+                ))
+                .into());
+            }
+            if cfg.installed[i].destination == cfg.installed[j].destination {
+                return Err(AppError::Config(format!(
+                    "{} has duplicate `[[installed]]` entries with destination `{}`; remove the older one",
+                    p.display(),
+                    cfg.installed[i].destination.display()
+                ))
+                .into());
+            }
+        }
     }
     Ok(cfg)
 }
@@ -257,6 +299,116 @@ installed_at = "2026-05-20T00:00:00Z"
     fn validate_rejects_ansi_in_name() {
         let s = make_skill("\x1b[31mEVIL\x1b[0m", "skills/foo", ".claude/skills/foo");
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn load_rejects_unknown_top_level_key() {
+        let work = TempDir::new().unwrap();
+        let raw = r#"
+mystery_field = "from the future"
+
+[[installed]]
+name = "foo"
+source_path = "skills/foo"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/foo"
+installed_at = "2026-05-22T00:00:00Z"
+"#;
+        fs::write(work.path().join(".skills.toml"), raw).unwrap();
+        // anyhow's Display only shows the outermost context by default;
+        // `{:#}` walks the cause chain so the underlying serde error
+        // ("unknown field `mystery_field`") surfaces.
+        let err = format!("{:#}", load(work.path()).unwrap_err());
+        assert!(
+            err.contains("unknown field") || err.contains("mystery_field"),
+            "expected an unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_unknown_installed_key() {
+        let work = TempDir::new().unwrap();
+        let raw = r#"
+[[installed]]
+name = "foo"
+source_path = "skills/foo"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/foo"
+installed_at = "2026-05-22T00:00:00Z"
+sneaky = true
+"#;
+        fs::write(work.path().join(".skills.toml"), raw).unwrap();
+        let err = format!("{:#}", load(work.path()).unwrap_err());
+        assert!(
+            err.contains("unknown field") || err.contains("sneaky"),
+            "expected an unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_duplicate_name() {
+        let work = TempDir::new().unwrap();
+        let raw = r#"
+[[installed]]
+name = "foo"
+source_path = "skills/foo"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/foo"
+installed_at = "2026-05-22T00:00:00Z"
+
+[[installed]]
+name = "foo"
+source_path = "skills/foo2"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/foo-alt"
+installed_at = "2026-05-22T00:00:00Z"
+"#;
+        fs::write(work.path().join(".skills.toml"), raw).unwrap();
+        let err = load(work.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate") && err.contains("foo"),
+            "expected duplicate error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_duplicate_destination() {
+        let work = TempDir::new().unwrap();
+        let raw = r#"
+[[installed]]
+name = "foo"
+source_path = "skills/foo"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/shared"
+installed_at = "2026-05-22T00:00:00Z"
+
+[[installed]]
+name = "bar"
+source_path = "skills/bar"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/shared"
+installed_at = "2026-05-22T00:00:00Z"
+"#;
+        fs::write(work.path().join(".skills.toml"), raw).unwrap();
+        let err = load(work.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate") && err.contains("destination"),
+            "expected duplicate destination error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_too_many_entries() {
+        let work = TempDir::new().unwrap();
+        let mut raw = String::new();
+        for i in 0..(MAX_INSTALLED_ENTRIES + 1) {
+            raw.push_str(&format!(
+                "[[installed]]\nname = \"s{i}\"\nsource_path = \"skills/s{i}\"\nsource_sha = \"0123456789abcdef0123456789abcdef01234567\"\ndestination = \".claude/skills/s{i}\"\ninstalled_at = \"2026-05-22T00:00:00Z\"\n\n"
+            ));
+        }
+        fs::write(work.path().join(".skills.toml"), &raw).unwrap();
+        let err = load(work.path()).unwrap_err().to_string();
+        assert!(err.contains("cap"), "expected entry-cap error, got: {err}");
     }
 
     #[test]

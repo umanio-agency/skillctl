@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::error::AppError;
 
-/// Recursively copy `src` into `dst`. Hard-rejects, with `AppError::Config`,
+/// Iteratively copy `src` into `dst`. Hard-rejects, with `AppError::Config`,
 /// any of:
 /// - symlinks at the top-level `src` or any descendant entry (would let a
 ///   crafted link exfiltrate or overwrite files outside the skill, then ship
@@ -16,6 +16,18 @@ use crate::error::AppError;
 /// - regular files with `nlink > 1` (hardlinks share inodes; on Unix
 ///   `fs::copy` would read the target content as-is, enabling silent
 ///   exfiltration through the round-trip).
+///
+/// Implementation: explicit work-stack (`Vec<(PathBuf, PathBuf)>`) of
+/// `(from, to)` directory pairs instead of recursion, so a maliciously
+/// deep skill tree (e.g. 10k-level nesting) cannot blow Rust's default
+/// 8 MiB thread stack.
+///
+/// On Unix: regular file modes are masked to `0o644 | (src_mode & 0o100)`
+/// (i.e. only the user-execute bit is propagated; setuid/setgid/sticky,
+/// group/world writability, and group/world execute bits are stripped).
+/// Skills do not need group/world writability or setuid; a library
+/// drop-in of a setuid binary would otherwise become an attack vector when
+/// installed into a project that gets shared with others.
 pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     let src_meta = fs::symlink_metadata(src)
         .with_context(|| format!("reading metadata for {}", src.display()))?;
@@ -35,32 +47,40 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         .into());
     }
     fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
-    for entry in fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("stat {}", from.display()))?;
-        if file_type.is_symlink() {
-            return Err(AppError::Config(format!(
-                "refusing to copy symlink `{}`: skill folders may not contain symlinks (a crafted link could exfiltrate or overwrite files outside the skill, e.g. `~/.aws/credentials`). Replace the symlink with actual content if it is intentional.",
-                from.display()
-            ))
-            .into());
-        }
-        if file_type.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else if file_type.is_file() {
-            reject_hardlink(&from)?;
-            fs::copy(&from, &to)
-                .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
-        } else {
-            return Err(AppError::Config(format!(
-                "refusing to copy `{}`: not a regular file or directory (FIFO, socket, device, or other special file). Skill folders may contain only regular files and directories.",
-                from.display()
-            ))
-            .into());
+
+    let mut stack: Vec<(PathBuf, PathBuf)> = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((from_dir, to_dir)) = stack.pop() {
+        for entry in
+            fs::read_dir(&from_dir).with_context(|| format!("reading {}", from_dir.display()))?
+        {
+            let entry = entry?;
+            let from = entry.path();
+            let to = to_dir.join(entry.file_name());
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("stat {}", from.display()))?;
+            if file_type.is_symlink() {
+                return Err(AppError::Config(format!(
+                    "refusing to copy symlink `{}`: skill folders may not contain symlinks (a crafted link could exfiltrate or overwrite files outside the skill, e.g. `~/.aws/credentials`). Replace the symlink with actual content if it is intentional.",
+                    from.display()
+                ))
+                .into());
+            }
+            if file_type.is_dir() {
+                fs::create_dir_all(&to).with_context(|| format!("creating {}", to.display()))?;
+                stack.push((from, to));
+            } else if file_type.is_file() {
+                reject_hardlink(&from)?;
+                fs::copy(&from, &to)
+                    .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+                mask_file_mode(&to)?;
+            } else {
+                return Err(AppError::Config(format!(
+                    "refusing to copy `{}`: not a regular file or directory (FIFO, socket, device, or other special file). Skill folders may contain only regular files and directories.",
+                    from.display()
+                ))
+                .into());
+            }
         }
     }
     Ok(())
@@ -87,6 +107,26 @@ fn reject_hardlink(_path: &Path) -> Result<()> {
     // Hardlink detection on Windows requires `GetFileInformationByHandle` and
     // counting via `nNumberOfLinks` — not in std. Skip until a real Windows
     // use case forces the implementation.
+    Ok(())
+}
+
+#[cfg(unix)]
+fn mask_file_mode(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta =
+        fs::metadata(path).with_context(|| format!("reading mode for {}", path.display()))?;
+    let src_mode = meta.permissions().mode();
+    let masked = 0o644 | (src_mode & 0o100);
+    if (src_mode & 0o7777) != masked {
+        let perms = std::fs::Permissions::from_mode(masked);
+        fs::set_permissions(path, perms)
+            .with_context(|| format!("masking mode of {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn mask_file_mode(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -422,6 +462,77 @@ mod tests {
             "no skillctl-* siblings should remain, found: {:?}",
             leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn copy_dir_all_handles_deep_nesting() {
+        // 200 levels of single-character dir names. Recursive copy_dir_all
+        // could blow the stack on debug builds (each frame holds a DirEntry
+        // iterator); the iterative version handles arbitrary depth bounded
+        // only by the filesystem's PATH_MAX (≈1024 bytes on macOS) — kept
+        // short here to stay well under that limit.
+        let work = TempDir::new().unwrap();
+        let src = work.path().join("src");
+        let mut cur = src.clone();
+        for _ in 0..200 {
+            cur = cur.join("a");
+        }
+        fs::create_dir_all(&cur).unwrap();
+        fs::write(cur.join("leaf.txt"), "deep").unwrap();
+
+        let dst = work.path().join("dst");
+        copy_dir_all(&src, &dst).unwrap();
+
+        let mut cur = dst.clone();
+        for _ in 0..200 {
+            cur = cur.join("a");
+        }
+        assert_eq!(fs::read_to_string(cur.join("leaf.txt")).unwrap(), "deep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_all_masks_setuid_and_world_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let work = TempDir::new().unwrap();
+        let src = work.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let exec_file = src.join("exec");
+        fs::write(&exec_file, "#!/bin/sh\n").unwrap();
+        // setuid (04000) + setgid (02000) + sticky (01000) + 0777 = 07777
+        fs::set_permissions(&exec_file, std::fs::Permissions::from_mode(0o7777)).unwrap();
+
+        let dst = work.path().join("dst");
+        copy_dir_all(&src, &dst).unwrap();
+
+        let dst_mode = fs::metadata(dst.join("exec")).unwrap().permissions().mode() & 0o7777;
+        // setuid/setgid/sticky stripped, group/world write stripped, exec
+        // bit preserved → expect 0744.
+        assert_eq!(dst_mode, 0o744, "expected 0o744, got 0o{:o}", dst_mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_all_preserves_644_for_non_exec_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let work = TempDir::new().unwrap();
+        let src = work.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let plain = src.join("data.txt");
+        fs::write(&plain, "hello").unwrap();
+        fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let dst = work.path().join("dst");
+        copy_dir_all(&src, &dst).unwrap();
+
+        let dst_mode = fs::metadata(dst.join("data.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(dst_mode, 0o644, "expected 0o644, got 0o{:o}", dst_mode);
     }
 
     #[test]
