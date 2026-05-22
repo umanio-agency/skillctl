@@ -91,10 +91,29 @@ pub fn load(project_root: &Path) -> Result<ProjectConfig> {
     Ok(cfg)
 }
 
+/// Atomically write `.skills.toml`. We write the new content to a sibling
+/// temp file, then `fs::rename` it over the target — a crash mid-write only
+/// leaves the temp file on disk (cleaned up on the next failure path); the
+/// live `.skills.toml` is never truncated.
 pub fn save(project_root: &Path, cfg: &ProjectConfig) -> Result<()> {
     let p = path(project_root);
     let raw = toml::to_string_pretty(cfg).context("serializing project config")?;
-    fs::write(&p, raw).with_context(|| format!("writing {}", p.display()))?;
+
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = p.with_file_name(format!(".skills.toml.tmp.{pid}.{nanos}"));
+
+    if let Err(e) = fs::write(&tmp, &raw) {
+        return Err(e).with_context(|| format!("writing {}", tmp.display()));
+    }
+    if let Err(e) = fs::rename(&tmp, &p) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e)
+            .with_context(|| format!("atomic rename {} -> {}", tmp.display(), p.display()));
+    }
     Ok(())
 }
 

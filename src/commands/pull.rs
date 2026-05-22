@@ -15,6 +15,7 @@ use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
+use crate::lock;
 use crate::path_safety::safe_join;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill;
@@ -88,6 +89,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         ))
         .into());
     }
+    let _cache_lock = lock::acquire_exclusive(&library_root, "library cache")?;
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
         ui::log_warning(
@@ -99,6 +101,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
         ui::outro(
@@ -146,6 +149,13 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                     "{} — destination {} no longer exists; can't pull",
                     c.name,
                     c.destination.display()
+                ),
+            )?,
+            SkillStatus::SourceShaOrphaned => ui::log_warning(
+                ctx,
+                format!(
+                    "{} — source_sha in .skills.toml doesn't resolve in the library (force-pushed or GC'd); skipping. Delete the entry and re-install to repair.",
+                    c.name
                 ),
             )?,
             _ => {}
@@ -262,6 +272,10 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
 
     let new_sha = git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
+    // Continue-on-error per apply: a single skill failing should not abort
+    // the others or lose the saved state of earlier successes. The save at
+    // the end of the function runs unconditionally so any successful
+    // source_sha updates are persisted.
     for apply in &applies {
         let installed_name = project_cfg.installed[apply.candidate_index].name.clone();
         let installed_destination = project_cfg.installed[apply.candidate_index]
@@ -270,64 +284,78 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         let installed_source_path = project_cfg.installed[apply.candidate_index]
             .source_path
             .clone();
-        // Belt-and-suspenders: `installed.destination` and `installed.source_path`
-        // are validated at `project_config::load` time, but `safe_join` re-checks
-        // at the destructive call site to defend against any future code path
-        // that constructs `InstalledSkill` without going through load.
-        let local_dir = safe_join(&cwd, &installed_destination)?;
-        let library_dir = safe_join(&library_root, &installed_source_path)?;
+        let outcome: Result<()> = (|| {
+            // Belt-and-suspenders: `installed.destination` and `installed.source_path`
+            // are validated at `project_config::load` time, but `safe_join` re-checks
+            // at the destructive call site to defend against any future code path
+            // that constructs `InstalledSkill` without going through load.
+            let local_dir = safe_join(&cwd, &installed_destination)?;
+            let library_dir = safe_join(&library_root, &installed_source_path)?;
 
-        match &apply.op {
-            ApplyOp::Pull => {
-                fs_util::replace_folder_contents(&library_dir, &local_dir)?;
-                project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
-                ui::log_success(ctx, format!("{} → {}", installed_name, short_sha(&new_sha)))?;
-                results.push(json!({
-                    "name": installed_name,
-                    "status": "pulled",
-                    "source_sha": new_sha,
-                }));
-            }
-            ApplyOp::ForkLocal { local_fork_name } => {
-                let fork_dest = local_fork_destination(
-                    &project_cfg.installed[apply.candidate_index],
-                    &cwd,
-                    local_fork_name,
-                );
-                if fork_dest.exists() {
-                    return Err(AppError::Conflict(format!(
-                        "cannot fork-locally: target {} already exists",
-                        fork_dest.display()
-                    ))
-                    .into());
+            match &apply.op {
+                ApplyOp::Pull => {
+                    fs_util::replace_folder_contents(&library_dir, &local_dir)?;
+                    project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
+                    ui::log_success(ctx, format!("{} → {}", installed_name, short_sha(&new_sha)))?;
+                    results.push(json!({
+                        "name": installed_name,
+                        "status": "pulled",
+                        "source_sha": new_sha,
+                    }));
                 }
-                fs::rename(&local_dir, &fork_dest).with_context(|| {
-                    format!(
-                        "renaming {} -> {}",
-                        local_dir.display(),
-                        fork_dest.display()
-                    )
-                })?;
-                fs_util::copy_dir_all(&library_dir, &local_dir)?;
-                project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
-                let fork_rel = fs_util::relative_to_or_self(&fork_dest, &cwd);
-                ui::log_success(
-                    ctx,
-                    format!(
-                        "{} → {} (local fork preserved at {})",
-                        installed_name,
-                        short_sha(&new_sha),
-                        fork_rel.display()
-                    ),
-                )?;
-                results.push(json!({
-                    "name": installed_name,
-                    "status": "pulled",
-                    "fork_local": local_fork_name,
-                    "fork_local_path": fork_rel.display().to_string(),
-                    "source_sha": new_sha,
-                }));
+                ApplyOp::ForkLocal { local_fork_name } => {
+                    let fork_dest = local_fork_destination(
+                        &project_cfg.installed[apply.candidate_index],
+                        &cwd,
+                        local_fork_name,
+                    );
+                    if fork_dest.exists() {
+                        return Err(AppError::Conflict(format!(
+                            "cannot fork-locally: target {} already exists",
+                            fork_dest.display()
+                        ))
+                        .into());
+                    }
+                    // Atomic fork-locally: stage the library content into a
+                    // temp sibling of local_dir, then swap (rename local_dir
+                    // → fork_dest, rename staging → local_dir). A crash
+                    // between the two renames leaves either the old or the
+                    // new content at local_dir — never partial or missing.
+                    let staging = fs_util::unique_sibling(&local_dir, "pull-stage");
+                    if let Err(e) = fs_util::copy_dir_all(&library_dir, &staging) {
+                        let _ = fs::remove_dir_all(&staging);
+                        return Err(e);
+                    }
+                    fs_util::swap_with_bak(&staging, &local_dir, &fork_dest)?;
+                    project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
+                    let fork_rel = fs_util::relative_to_or_self(&fork_dest, &cwd);
+                    ui::log_success(
+                        ctx,
+                        format!(
+                            "{} → {} (local fork preserved at {})",
+                            installed_name,
+                            short_sha(&new_sha),
+                            fork_rel.display()
+                        ),
+                    )?;
+                    results.push(json!({
+                        "name": installed_name,
+                        "status": "pulled",
+                        "fork_local": local_fork_name,
+                        "fork_local_path": fork_rel.display().to_string(),
+                        "source_sha": new_sha,
+                    }));
+                }
             }
+            Ok(())
+        })();
+        if let Err(e) = outcome {
+            let _ = ui::log_warning(ctx, format!("pull failed for `{installed_name}`: {e}"));
+            results.push(json!({
+                "name": installed_name,
+                "status": "failed",
+                "reason": e.to_string(),
+            }));
         }
     }
 
@@ -508,5 +536,6 @@ fn describe(status: &SkillStatus) -> String {
         SkillStatus::LocalChangesOnly => "local edits, library unchanged".to_string(),
         SkillStatus::LocalMissing => "destination missing locally".to_string(),
         SkillStatus::LibraryMissing => "removed from library".to_string(),
+        SkillStatus::SourceShaOrphaned => "source_sha orphan; can't classify".to_string(),
     }
 }

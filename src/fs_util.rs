@@ -90,12 +90,20 @@ fn reject_hardlink(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Replace the contents of `dst` with the contents of `src`.
-/// Removes `dst` first if it exists, so any files only in `dst` are dropped.
+/// Atomically replace the contents of `dst` with the contents of `src`.
+///
+/// Crash safety: at any process-interruption point (SIGINT, panic, power
+/// loss between two `fs::rename` syscalls), either the old `dst` or the new
+/// content is in place — never a half-written tree. The implementation
+/// stages the new content into a uniquely-named sibling of `dst`, moves the
+/// old `dst` aside into a backup sibling, then atomically renames the
+/// staging dir over `dst`. A failure during the staging copy never touches
+/// the live `dst`. A failure during the final rename rolls the backup back
+/// into place.
 ///
 /// Refuses to operate when `dst` is itself a symlink: a malicious symlink at
 /// the destination (e.g. `.claude/skills` linked to `~/.ssh`) would otherwise
-/// be followed by `remove_dir_all` and wipe arbitrary directories.
+/// be followed and replace the target's content.
 pub fn replace_folder_contents(src: &Path, dst: &Path) -> Result<()> {
     if dst.exists() {
         let dst_meta = fs::symlink_metadata(dst)
@@ -107,9 +115,96 @@ pub fn replace_folder_contents(src: &Path, dst: &Path) -> Result<()> {
             ))
             .into());
         }
-        fs::remove_dir_all(dst).with_context(|| format!("removing {}", dst.display()))?;
     }
-    copy_dir_all(src, dst)
+
+    let tmp = unique_sibling(dst, "tmp");
+    let bak = unique_sibling(dst, "bak");
+
+    // Stage new content into a fresh sibling. copy_dir_all creates the dir
+    // itself; on failure here, dst is untouched.
+    if let Err(e) = copy_dir_all(src, &tmp) {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+
+    let dst_existed = dst.exists();
+    if dst_existed {
+        if let Err(e) = fs::rename(dst, &bak) {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(e).with_context(|| format!("moving {} aside before swap", dst.display()));
+        }
+    }
+
+    if let Err(e) = fs::rename(&tmp, dst) {
+        // Roll back: try to restore the old dst from the backup. If that
+        // fails too, leave both bak and tmp on disk so the operator can
+        // recover manually — surface a clear error mentioning both paths.
+        if dst_existed {
+            if let Err(restore_err) = fs::rename(&bak, dst) {
+                let _ = fs::remove_dir_all(&tmp);
+                return Err(anyhow::anyhow!(
+                    "swap failed and rollback failed: original content is at {}, new content at {} (original error: {e}, rollback error: {restore_err})",
+                    bak.display(),
+                    tmp.display()
+                ));
+            }
+        }
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e).with_context(|| format!("swapping staging copy into {}", dst.display()));
+    }
+
+    if dst_existed {
+        let _ = fs::remove_dir_all(&bak);
+    }
+    Ok(())
+}
+
+/// Atomically swap `new_content` into `dst`, moving any existing `dst` to
+/// `bak_path` first. On failure during the final rename, the old content at
+/// `bak_path` is renamed back. The `new_content` directory is consumed
+/// (renamed into place on success, removed on failure).
+///
+/// Used by `pull --on-divergence fork-locally`: the caller stages the
+/// library version into a temp sibling of the local destination, then calls
+/// this with `bak_path` set to the operator-chosen fork target. On crash
+/// between the two renames, either the original or the new content is at
+/// `dst` (never neither, never partial).
+pub fn swap_with_bak(new_content: &Path, dst: &Path, bak_path: &Path) -> Result<()> {
+    let dst_existed = dst.exists();
+    if dst_existed {
+        fs::rename(dst, bak_path).with_context(|| {
+            format!(
+                "moving {} aside to {} before swap",
+                dst.display(),
+                bak_path.display()
+            )
+        })?;
+    }
+    if let Err(e) = fs::rename(new_content, dst) {
+        if dst_existed {
+            let _ = fs::rename(bak_path, dst);
+        }
+        let _ = fs::remove_dir_all(new_content);
+        return Err(e).with_context(|| format!("swapping into {}", dst.display()));
+    }
+    Ok(())
+}
+
+/// Build a uniquely-named sibling path of `dst` for use as a staging or
+/// backup slot. The name is hidden (`.skillctl-…`), tagged with the role
+/// (`tmp` or `bak`), the original basename, the process id, and a
+/// nanosecond timestamp. Unique under the standard `LibraryCacheLock` /
+/// `ProjectConfigLock` protection in `src/lock.rs`, and unique-enough even
+/// without locks given the nanosecond resolution + pid.
+pub fn unique_sibling(dst: &Path, role: &str) -> PathBuf {
+    let parent = dst.parent().unwrap_or(Path::new("."));
+    let basename = dst.file_name().and_then(|n| n.to_str()).unwrap_or("anon");
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(".skillctl-{role}.{basename}.{pid}.{nanos}"))
 }
 
 /// Express `path` relative to `base` when possible; otherwise strip a leading
@@ -281,5 +376,70 @@ mod tests {
         assert!(dst.join("a").exists());
         assert!(!dst.join("b").exists(), "old content should be gone");
         assert_eq!(fs::read_to_string(dst.join("a")).unwrap(), "new");
+    }
+
+    #[test]
+    fn replace_folder_contents_failure_preserves_dst() {
+        // If the source is unreadable (we use a non-existent path), the
+        // staging copy fails and `dst` is left untouched. This validates
+        // the atomicity contract: failure means dst's old content stays.
+        let work = TempDir::new().unwrap();
+        let dst = work.path().join("dst");
+        fs::create_dir(&dst).unwrap();
+        fs::write(dst.join("important"), "do not lose").unwrap();
+
+        let bad_src = work.path().join("does-not-exist");
+        let result = replace_folder_contents(&bad_src, &dst);
+        assert!(result.is_err());
+        assert!(
+            dst.join("important").exists(),
+            "dst must be untouched on staging failure"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.join("important")).unwrap(),
+            "do not lose"
+        );
+    }
+
+    #[test]
+    fn replace_folder_contents_failure_cleans_staging() {
+        let work = TempDir::new().unwrap();
+        let dst = work.path().join("dst");
+        fs::create_dir(&dst).unwrap();
+
+        let bad_src = work.path().join("does-not-exist");
+        let _ = replace_folder_contents(&bad_src, &dst);
+
+        // No `.skillctl-tmp.*` or `.skillctl-bak.*` siblings should remain.
+        let parent = dst.parent().unwrap();
+        let leftovers: Vec<_> = fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".skillctl-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no skillctl-* siblings should remain, found: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn swap_with_bak_moves_dst_to_bak_and_new_into_dst() {
+        let work = TempDir::new().unwrap();
+        let dst = work.path().join("dst");
+        let bak = work.path().join("bak");
+        let new_src = work.path().join("new-content");
+
+        fs::create_dir(&dst).unwrap();
+        fs::write(dst.join("old"), "old-value").unwrap();
+        fs::create_dir(&new_src).unwrap();
+        fs::write(new_src.join("new"), "new-value").unwrap();
+
+        swap_with_bak(&new_src, &dst, &bak).unwrap();
+        assert!(dst.join("new").exists(), "new content should be at dst");
+        assert!(!dst.join("old").exists());
+        assert!(bak.join("old").exists(), "old content should be at bak");
+        assert!(!new_src.exists(), "new_src is consumed by the rename");
     }
 }

@@ -7,6 +7,7 @@ use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
 use crate::git;
+use crate::lock;
 use crate::skill;
 
 pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
@@ -25,6 +26,10 @@ pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
         ))
         .into());
     }
+    // Even read-only `list` mutates the cache via `git fetch && reset --hard`;
+    // serialise to prevent concurrent index corruption with a sibling `push`
+    // or `pull`. Released on function return.
+    let _cache_lock = lock::acquire_exclusive(&repo, "library cache")?;
 
     if let Err(e) = git::fetch_and_fast_forward(&repo)
         && !ctx.json

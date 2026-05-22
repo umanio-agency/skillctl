@@ -60,10 +60,22 @@ pub fn head_sha(repo: &Path) -> Result<String> {
     Ok(sha.trim().to_string())
 }
 
-/// List the blob SHAs of every file under `path` at `refspec`, keyed by their
-/// repo-relative path. Returns an empty map if the path does not exist at that
-/// ref (a missing-from-library signal).
-pub fn ls_tree_blobs(repo: &Path, refspec: &str, path: &Path) -> Result<HashMap<PathBuf, String>> {
+/// List the blob SHAs of every file under `path` at `refspec`, keyed by
+/// their repo-relative path.
+///
+/// Returns:
+/// - `Ok(Some(map))` with an empty map if the path doesn't exist at that
+///   ref (a missing-from-library signal).
+/// - `Ok(None)` if the `refspec` itself doesn't resolve in this repo —
+///   e.g. an orphaned `source_sha` from `.skills.toml` after a library
+///   force-push or GC. Callers should treat this as a per-skill problem
+///   (skip with warning) rather than failing the whole batch.
+/// - `Err(...)` for any other git failure.
+pub fn ls_tree_blobs(
+    repo: &Path,
+    refspec: &str,
+    path: &Path,
+) -> Result<Option<HashMap<PathBuf, String>>> {
     let output = Command::new("git")
         .current_dir(repo)
         .args(["ls-tree", "-r", "-z", refspec, "--"])
@@ -77,10 +89,17 @@ pub fn ls_tree_blobs(repo: &Path, refspec: &str, path: &Path) -> Result<HashMap<
             )
         })?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Not a valid object name")
+            || stderr.contains("unknown revision")
+            || stderr.contains("bad revision")
+        {
+            return Ok(None);
+        }
         return Err(anyhow!(
             "`git ls-tree {refspec}` failed in {}: {}",
             repo.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
         ));
     }
     let raw = String::from_utf8(output.stdout).context("`git ls-tree` returned non-UTF8 output")?;
@@ -101,7 +120,7 @@ pub fn ls_tree_blobs(repo: &Path, refspec: &str, path: &Path) -> Result<HashMap<
         let sha = parts[2].to_string();
         map.insert(PathBuf::from(file), sha);
     }
-    Ok(map)
+    Ok(Some(map))
 }
 
 /// Compute the git blob SHA of a local file as if it were `git add`-ed.

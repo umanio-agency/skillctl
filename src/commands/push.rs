@@ -17,6 +17,7 @@ use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
+use crate::lock;
 use crate::path_safety::safe_join;
 use crate::project_config::{self, InstalledSkill};
 use crate::sanitize::validate_message_safe;
@@ -104,6 +105,10 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         ))
         .into());
     }
+    // Serialise all library-cache mutations (fetch + reset + add + commit +
+    // push) across concurrent skillctl processes. Released on function
+    // return.
+    let _cache_lock = lock::acquire_exclusive(&library_root, "library cache")?;
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
         ui::log_warning(
@@ -115,6 +120,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
         ui::outro(
@@ -152,6 +158,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     "{} — destination {} no longer exists; skipping",
                     c.name,
                     c.destination.display()
+                ),
+            )?,
+            SkillStatus::SourceShaOrphaned => ui::log_warning(
+                ctx,
+                format!(
+                    "{} — source_sha in .skills.toml doesn't resolve in the library (force-pushed or GC'd); skipping. Run `skillctl pull` then re-install to repair.",
+                    c.name
                 ),
             )?,
             _ => {}
@@ -377,39 +390,41 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .format(&Rfc3339)
         .context("formatting installation timestamp")?;
 
+    // Phase 1: in-memory mutations only. Update entries' source_sha (or
+    // fully replace for forks). Capture the data we need for post-save
+    // logging + the local rename targets.
+    enum PostSaveTask {
+        Update {
+            name: String,
+        },
+        Fork {
+            orig_name: String,
+            new_name: String,
+            new_library_path: PathBuf,
+            abs_old: PathBuf,
+            abs_new: PathBuf,
+        },
+    }
+    let mut tasks: Vec<PostSaveTask> = Vec::with_capacity(applies.len());
     for apply in &applies {
         match &apply.op {
             ApplyOp::Update => {
-                let entry = &mut project_cfg.installed[apply.candidate_index];
-                entry.source_sha = new_sha.clone();
-                ui::log_success(ctx, format!("{} → {}", entry.name, short_sha(&new_sha)))?;
-                results.push(json!({
-                    "name": entry.name,
-                    "status": "pushed",
-                    "operation": "update",
-                    "source_sha": new_sha,
-                }));
+                project_cfg.installed[apply.candidate_index].source_sha = new_sha.clone();
+                tasks.push(PostSaveTask::Update {
+                    name: project_cfg.installed[apply.candidate_index].name.clone(),
+                });
             }
             ApplyOp::Fork {
                 new_name,
                 new_library_path,
                 new_local_destination,
             } => {
+                let orig_name = project_cfg.installed[apply.candidate_index].name.clone();
                 let abs_old = safe_join(
                     &cwd,
                     &project_cfg.installed[apply.candidate_index].destination,
                 )?;
                 let abs_new = safe_join(&cwd, new_local_destination)?;
-                if abs_old != abs_new {
-                    if let Some(parent) = abs_new.parent() {
-                        fs::create_dir_all(parent)
-                            .with_context(|| format!("creating parent of {}", abs_new.display()))?;
-                    }
-                    fs::rename(&abs_old, &abs_new).with_context(|| {
-                        format!("renaming {} -> {}", abs_old.display(), abs_new.display())
-                    })?;
-                }
-                let original_name = project_cfg.installed[apply.candidate_index].name.clone();
                 project_cfg.installed[apply.candidate_index] = InstalledSkill {
                     name: new_name.clone(),
                     source_path: new_library_path.clone(),
@@ -417,12 +432,83 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     destination: new_local_destination.clone(),
                     installed_at: installed_at.clone(),
                 };
+                tasks.push(PostSaveTask::Fork {
+                    orig_name,
+                    new_name: new_name.clone(),
+                    new_library_path: new_library_path.clone(),
+                    abs_old,
+                    abs_new,
+                });
+            }
+        }
+    }
+
+    // Phase 2: atomically persist .skills.toml. After this returns, the
+    // operator's tracked state matches the library — even if a subsequent
+    // local rename fails (Phase 3), the SHA mapping is durable and the
+    // operator can repair the local folder by hand. Failure here is fatal:
+    // we've already pushed upstream but the local index doesn't know yet,
+    // so the next run will reclassify and offer to pull — recoverable but
+    // surprising. The atomic-rename in `project_config::save` keeps the
+    // failure window to "disk full" / "EACCES" rather than partial writes.
+    project_config::save(&cwd, &project_cfg)?;
+
+    // Phase 3: local renames for forks + logging. Rename errors here are
+    // surfaced as warnings but do NOT propagate — the library and
+    // .skills.toml are already in sync; only the local folder name lags,
+    // which the operator can fix manually.
+    for task in &tasks {
+        match task {
+            PostSaveTask::Update { name } => {
+                ui::log_success(ctx, format!("{} → {}", name, short_sha(&new_sha)))?;
+                results.push(json!({
+                    "name": name,
+                    "status": "pushed",
+                    "operation": "update",
+                    "source_sha": new_sha,
+                }));
+            }
+            PostSaveTask::Fork {
+                orig_name,
+                new_name,
+                new_library_path,
+                abs_old,
+                abs_new,
+            } => {
+                if abs_old != abs_new {
+                    let rename_err: Option<String> = (|| {
+                        if let Some(parent) = abs_new.parent() {
+                            if let Err(e) = fs::create_dir_all(parent) {
+                                return Some(format!(
+                                    "creating parent of {}: {e}",
+                                    abs_new.display()
+                                ));
+                            }
+                        }
+                        if let Err(e) = fs::rename(abs_old, abs_new) {
+                            return Some(format!(
+                                "renaming {} -> {}: {e}",
+                                abs_old.display(),
+                                abs_new.display()
+                            ));
+                        }
+                        None
+                    })();
+                    if let Some(reason) = rename_err {
+                        ui::log_warning(
+                            ctx,
+                            format!(
+                                "library updated but local rename failed for `{orig_name}` → `{new_name}`: {reason}. `.skills.toml` records the new destination; rename the local folder by hand to clear the divergence."
+                            ),
+                        )?;
+                    }
+                }
                 ui::log_success(
                     ctx,
                     format!("forked → {} ({})", new_name, short_sha(&new_sha)),
                 )?;
                 results.push(json!({
-                    "name": original_name,
+                    "name": orig_name,
                     "status": "forked",
                     "operation": "fork",
                     "new_name": new_name,
@@ -432,7 +518,6 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             }
         }
     }
-    project_config::save(&cwd, &project_cfg)?;
 
     let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
     let forked = results.iter().filter(|r| r["status"] == "forked").count();
@@ -646,6 +731,7 @@ fn describe(status: &SkillStatus) -> String {
         SkillStatus::Unchanged => "no local changes".to_string(),
         SkillStatus::LocalMissing => "destination missing locally".to_string(),
         SkillStatus::LibraryMissing => "removed from library".to_string(),
+        SkillStatus::SourceShaOrphaned => "source_sha orphan; can't classify".to_string(),
     }
 }
 

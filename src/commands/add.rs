@@ -16,6 +16,7 @@ use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
+use crate::lock;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
 use crate::ui;
@@ -62,6 +63,9 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
         ))
         .into());
     }
+    // Serialise all library-cache mutations across concurrent skillctl
+    // processes. Released on function return.
+    let _cache_lock = lock::acquire_exclusive(&library_root, "library cache")?;
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
         ui::log_warning(
@@ -85,6 +89,8 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
+    // Serialise concurrent skillctl runs on this project's .skills.toml.
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
     let dest_root = resolve_destination(&args, ctx, &cwd)?;
     let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
 

@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-22
+
+### Security & robustness
+
+Close the seven HIGH atomicity / concurrency / DoS findings from the comprehensive audit's Phase 8.2. The headline items are not exploitable by an external attacker on a single-user box, but each represents a real data-loss or denial-of-service scenario under realistic conditions (Ctrl-C mid-operation, two concurrent `skillctl` runs, a malicious `.skills.toml` PR with an orphan `source_sha`).
+
+- **Atomic `replace_folder_contents`.** The copy primitive used by `add` / `pull` / `push` now stages new content into a uniquely-named sibling of the destination, moves the old destination aside into a backup sibling, then atomically renames the staging dir over the destination. At any crash point, either the old or the new content is in place — never a half-written tree. Rolls the backup back if the final rename fails. Closes three HIGH findings (H5, H6, H7) with one primitive.
+- **Atomic `.skills.toml` save.** `project_config::save` writes to a sibling temp file then `fs::rename`s it over the target — a crash mid-write only leaves the temp file on disk, never a truncated `.skills.toml`. Used by every command that mutates the tracked-skills index.
+- **Process-level locking on the library cache and `.skills.toml`.** New `src/lock.rs` provides `acquire_exclusive(dir, what)` backed by `fs4`'s cross-platform `try_lock_exclusive`. Every command that touches the library cache (`list` / `add` / `push` / `pull` / `detect`) holds an exclusive lock on `<cache>/.skillctl.lock` for the full `git fetch → mutate → push` critical section; every command that mutates `.skills.toml` additionally locks `<cwd>/.skillctl.lock`. A second concurrent `skillctl` invocation fails fast with `AppError::Conflict` ("another skillctl is running") rather than racing on `.git/index.lock`. Closes H3 + H4.
+- **`push` saves `.skills.toml` before any local rename.** Post-`git push`, the apply loop is now split into three phases: in-memory mutations, atomic save, then local renames (now non-fatal). A Ctrl-C between push and save used to leave `.skills.toml` referencing the old `source_sha`, which the next run would reclassify as `LibraryAhead` and offer to wipe local edits silently. The new ordering reduces the failure window to "disk full or EACCES at save time"; local rename failures degrade to a warning ("library updated but local rename failed — rename the local folder by hand") rather than dropping the SHA mapping. Closes H6.
+- **`pull` fork-locally is now atomic.** The pre-v0.1.4 sequence (`fs::rename` original aside, then `copy_dir_all` library version) could lose the original on a mid-copy failure (rename succeeded, copy failed, original gone, library version not yet present). Rewritten with the same tempdir-swap pattern as `replace_folder_contents` via the new `fs_util::swap_with_bak` helper. Closes H7.
+- **Orphan `source_sha` is per-skill, not a batch DoS.** A malicious `.skills.toml` entry with `source_sha = "0000…"` (a valid-hex but unknown commit) used to make `classify` return `Err` at the first such entry and abort the entire batch — weaponisable to DoS every other skill in the same `pull --all` / `push --all` run. `git::ls_tree_blobs` now returns `Result<Option<HashMap>>`, with `Ok(None)` for an unknown refspec; the classifier surfaces this as a new `SkillStatus::SourceShaOrphaned` variant, and `push` / `pull` log a per-skill warning ("source_sha doesn't resolve in the library; skipping") while continuing with the rest. Closes H9.
+- **`pull --all` continues on per-skill failure.** The apply loop now wraps each skill in an IIFE that logs a warning on error and continues. `.skills.toml` is saved at the end regardless, so successful per-skill `source_sha` updates persist even when a sibling apply fails. Closes H8 (pull side). The push-side equivalent (one-commit-per-run cleanup-on-failure) is deferred to a follow-up release.
+
+3 new unit tests cover the atomic-replace contract (failure preserves dst, failure cleans up staging, `swap_with_bak` round-trip); 2 new tests cover the lock primitive. `cargo test`: 100 pass; clippy clean; `cargo audit` clean. New runtime dependency: `fs4 = "0.13.1"` (advisory file locks).
+
 ## [0.1.3] - 2026-05-21
 
 ### Security

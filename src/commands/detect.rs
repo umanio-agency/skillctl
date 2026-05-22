@@ -16,6 +16,7 @@ use crate::context::Context;
 use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
+use crate::lock;
 use crate::path_safety::validate_relative_subpath;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
@@ -45,6 +46,7 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         ))
         .into());
     }
+    let _cache_lock = lock::acquire_exclusive(&library_root, "library cache")?;
 
     if let Err(e) = git::fetch_and_fast_forward(&library_root) {
         ui::log_warning(
@@ -54,6 +56,7 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
     let mut project_cfg = project_config::load(&cwd)?;
 
     let installed_canonical: HashSet<PathBuf> = project_cfg

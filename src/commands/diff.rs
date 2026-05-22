@@ -32,6 +32,14 @@ pub enum SkillStatus {
     LocalMissing,
     /// The skill's `source_path` no longer exists at the library's HEAD.
     LibraryMissing,
+    /// The `source_sha` recorded in `.skills.toml` no longer resolves in the
+    /// library (force-pushed history, GC'd, or attacker-supplied junk that
+    /// happens to be valid hex). We can't classify this entry so the
+    /// command skips it with a warning — without this variant a single
+    /// malicious `.skills.toml` entry with `source_sha = "0000…"` would
+    /// DoS every other entry in the batch by aborting `classify` at the
+    /// candidates loop.
+    SourceShaOrphaned,
 }
 
 pub fn classify(
@@ -44,12 +52,25 @@ pub fn classify(
         return Ok(SkillStatus::LocalMissing);
     }
 
-    let head_manifest = git::ls_tree_blobs(library_root, "HEAD", &installed.source_path)?;
+    let head_manifest = match git::ls_tree_blobs(library_root, "HEAD", &installed.source_path)? {
+        Some(m) => m,
+        // HEAD should always resolve in a freshly-fetched cache; if not, the
+        // whole library is broken — propagate as an error rather than per-skill.
+        None => {
+            return Err(anyhow::anyhow!(
+                "library HEAD doesn't resolve in the cache at {}",
+                library_root.display()
+            ));
+        }
+    };
     if head_manifest.is_empty() {
         return Ok(SkillStatus::LibraryMissing);
     }
     let source_manifest =
-        git::ls_tree_blobs(library_root, &installed.source_sha, &installed.source_path)?;
+        match git::ls_tree_blobs(library_root, &installed.source_sha, &installed.source_path)? {
+            Some(m) => m,
+            None => return Ok(SkillStatus::SourceShaOrphaned),
+        };
     let local_manifest = local_blob_manifest(&local_dir, &installed.source_path)?;
 
     let local_eq_source = local_manifest == source_manifest;
