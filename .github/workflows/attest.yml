@@ -1,21 +1,33 @@
 name: Attest release artifacts
 
-# Runs once per GitHub Release publication, AFTER cargo-dist's release
-# workflow has uploaded all 17 binary assets. Downloads every asset and
-# signs it with an SLSA build-provenance attestation, which the SLSA
-# verifier (and `gh attestation verify`) can use to confirm the binary
-# came from this repo's release workflow at the corresponding tag.
+# Generates SLSA build-provenance attestations for every binary asset
+# in a release, signed by GitHub Actions and recorded in Sigstore's
+# transparency log. Verifiable downstream with `gh attestation verify`.
 #
-# Why a separate workflow: cargo-dist regenerates `release.yml` from its
-# own templates, and inlining SLSA into the per-platform build jobs
-# would either fight cargo-dist on every dist-init or require
-# permissions: id-token: write to be threaded into multiple matrix jobs.
-# A standalone post-release workflow is simpler to reason about and
-# survives cargo-dist regeneration.
+# Trigger design:
+# - `workflow_run`: fires when the "Release" workflow completes
+#   successfully. We use this instead of `release: published` because
+#   cargo-dist's `host` job creates the GitHub Release via GITHUB_TOKEN,
+#   and GitHub explicitly suppresses event cascading from GITHUB_TOKEN
+#   actions — `release: published` simply never fires. `workflow_run`
+#   bypasses that suppression because it's a workflow-completion event,
+#   not a repo-content event.
+# - `workflow_dispatch`: manual fallback so an operator can re-attest
+#   a specific tag (e.g. v0.1.8 which shipped before this workflow
+#   trigger fix landed). Always pass an explicit `tag` input.
+#
+# Standalone (not threaded into cargo-dist's release.yml) so it
+# survives `cargo dist init` regeneration.
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to attest (e.g. v0.1.8). Required for manual dispatch.'
+        required: true
 
 permissions:
   # Required by actions/attest-build-provenance: it requests an OIDC token
@@ -29,15 +41,21 @@ permissions:
 jobs:
   attest:
     runs-on: ubuntu-latest
+    # For workflow_run: only fire when Release succeeded AND was
+    # triggered by a tag push (head_branch starts with `v`). For
+    # workflow_dispatch: always fire.
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || (github.event.workflow_run.conclusion == 'success'
+          && startsWith(github.event.workflow_run.head_branch, 'v'))
     steps:
       - name: Download release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
         run: |
           mkdir release-assets
-          # Skip the source tarballs (`*.tar.gz` / `*.zip` produced by
-          # GitHub itself) and the installers — only the binaries
+          # Skip the source tarballs and installers — only the binaries
           # (`skillctl-*.tar.xz` / `*.zip`) need cryptographic provenance.
           gh release download "$TAG" \
             --dir release-assets \
