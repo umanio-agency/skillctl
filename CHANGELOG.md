@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-05-25
+
+### Release engineering
+
+Re-ship v0.1.6's content with the release pipeline unblocked. v0.1.6 was tagged but its cargo-dist `plan` job failed because the manual `submodules: recursive → false` edit (Phase 8.4 L12) in `.github/workflows/release.yml` made `dist host --steps=create` refuse to run ("out of date contents and needs to be regenerated"). v0.1.6 is on crates.io but has no GitHub Release artifacts and no Homebrew tap update; v0.1.7 fixes that.
+
+- **`allow-dirty = ["ci"]` in `dist-workspace.toml`.** cargo-dist exposes an explicit allow-list to tolerate manual edits in the workflow it generates. Adding `ci` to it preserves the L12 defense-in-depth (no recursive submodule pull from the release runner) while letting `dist host` proceed.
+
+No code or test changes from v0.1.6.
+
 ## [0.1.6] - 2026-05-25
 
 ### Robustness & hygiene

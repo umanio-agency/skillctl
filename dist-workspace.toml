@@ -21,3 +21,10 @@ install-updater = false
 tap = "umanio-agency/homebrew-tap"
 # Jobs to run after the release artifacts are built
 publish-jobs = ["homebrew"]
+# Tolerate manual edits in the generated CI workflow. We override
+# `submodules: recursive` → `submodules: false` in `release.yml`
+# (Phase 8.4 L12 — defense-in-depth; we have no submodules and don't
+# want a future-added one to be silently pulled by the release job).
+# Without this allow-list, `dist host` refuses to run with "out of date
+# contents and needs to be regenerated".
+allow-dirty = ["ci"]
