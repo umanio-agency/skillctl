@@ -40,6 +40,17 @@ pub struct Skill {
     pub tags: Vec<String>,
 }
 
+/// Result of [`discover`]: the accepted skills plus non-fatal warnings
+/// surfaced during the walk (oversize SKILL.md skipped, case-insensitive
+/// name collisions, mixed-script "lookalike" names). Callers are expected
+/// to forward `warnings` through `ui::log_warning` so they respect the
+/// `--json` gating and don't pollute stderr in machine-consumed output.
+#[derive(Debug, Default)]
+pub struct DiscoverOutput {
+    pub skills: Vec<Skill>,
+    pub warnings: Vec<String>,
+}
+
 /// Walk `root` for skills (folders containing a `SKILL.md`).
 ///
 /// `include_vendored=false` (the safe default for project-side discovery):
@@ -51,7 +62,7 @@ pub struct Skill {
 ///
 /// `include_vendored=true`: walks every directory regardless of ignore
 /// files. Use only when the operator has typed the flag themselves.
-pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
+pub fn discover(root: &Path, include_vendored: bool) -> Result<DiscoverOutput> {
     let mut builder = WalkBuilder::new(root);
     builder.hidden(false);
     if include_vendored {
@@ -68,6 +79,7 @@ pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
     }
     let walker = builder.build();
     let mut skills = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for entry in walker {
         let entry = entry.context("walking the library tree")?;
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -91,10 +103,7 @@ pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
             Err(e) => {
                 // A SKILL.md that exceeds the cap or fails to read at all is
                 // a per-skill problem, not a reason to abort the whole walk.
-                // Dropping it from discovery means it cannot be added,
-                // pushed, or detected — surface this once via a stderr-side
-                // hint and continue.
-                eprintln!("warning: skipping {}: {e}", skill_md.display());
+                warnings.push(format!("skipping {}: {e}", skill_md.display()));
                 continue;
             }
         };
@@ -109,6 +118,17 @@ pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
         if validate_identifier("skill name", &resolved_name).is_err() {
             continue;
         }
+        // L3 (Phase 9): warn on names mixing distinct Unicode scripts —
+        // e.g. Cyrillic `а` next to Latin `a` are visually identical but
+        // would be different skills to skillctl. We accept the skill (the
+        // operator may have a legitimate multilingual name) but surface a
+        // warning so the operator can spot homograph attacks from a
+        // malicious library author.
+        if mixes_distinct_scripts(&resolved_name) {
+            warnings.push(format!(
+                "skill name `{resolved_name}` mixes distinct Unicode scripts (e.g. Latin + Cyrillic); double-check this isn't a homograph attack on a similarly-named skill"
+            ));
+        }
         let description = description.filter(|d| validate_message_safe("description", d).is_ok());
         let tags: Vec<String> = tags
             .into_iter()
@@ -122,7 +142,59 @@ pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
         });
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(skills)
+
+    // L6 (Phase 9): warn on case-insensitive name collisions. Two skills
+    // named `Foo` and `foo` are distinct under skillctl's canonical
+    // comparison (we treat names as identifier-class strings, case
+    // significant) but resolve to the same folder on case-insensitive
+    // filesystems (APFS-CI, HFS+, NTFS) — `add` would clobber one onto
+    // the other silently. Warn once per collision group.
+    let mut by_lower: std::collections::HashMap<String, Vec<&str>> =
+        std::collections::HashMap::new();
+    for s in &skills {
+        by_lower
+            .entry(s.name.to_lowercase())
+            .or_default()
+            .push(&s.name);
+    }
+    let mut collision_groups: Vec<Vec<String>> = by_lower
+        .into_iter()
+        .filter(|(_, names)| names.len() > 1)
+        .map(|(_, names)| {
+            let mut v: Vec<String> = names.into_iter().map(String::from).collect();
+            v.sort();
+            v
+        })
+        .collect();
+    collision_groups.sort();
+    for group in collision_groups {
+        warnings.push(format!(
+            "case-insensitive collision: {group:?} resolve to the same identifier on case-insensitive filesystems (APFS-CI, HFS+, NTFS)"
+        ));
+    }
+
+    Ok(DiscoverOutput { skills, warnings })
+}
+
+/// True when `s` contains characters from two or more distinct Unicode
+/// scripts (ignoring `Common`, `Inherited`, and `Unknown` — digits,
+/// punctuation, and emoji don't count). Used as a homograph heuristic
+/// at the discovery boundary.
+fn mixes_distinct_scripts(s: &str) -> bool {
+    use unicode_script::{Script, UnicodeScript};
+    let mut seen: Option<Script> = None;
+    for c in s.chars() {
+        let script = c.script();
+        if matches!(script, Script::Common | Script::Inherited | Script::Unknown) {
+            continue;
+        }
+        match seen {
+            None => seen = Some(script),
+            Some(prev) if prev == script => {}
+            Some(_) => return true,
+        }
+    }
+    false
 }
 
 /// Recursively find every directory literally named `skills` under `root`.
@@ -470,7 +542,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(lib.path(), false).unwrap();
+        let skills = discover(lib.path(), false).unwrap().skills;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"clean"));
         assert!(
@@ -491,7 +563,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(lib.path(), false).unwrap();
+        let skills = discover(lib.path(), false).unwrap().skills;
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "foo");
         assert_eq!(skills[0].tags, vec!["clean".to_string()]);
@@ -505,7 +577,7 @@ mod tests {
         std::fs::create_dir_all(&evil_dir).unwrap();
         std::fs::write(evil_dir.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
 
-        let skills = discover(work.path(), false).unwrap();
+        let skills = discover(work.path(), false).unwrap().skills;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"ok"));
         assert!(
@@ -521,12 +593,92 @@ mod tests {
         std::fs::create_dir_all(&evil_dir).unwrap();
         std::fs::write(evil_dir.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
 
-        let skills = discover(work.path(), true).unwrap();
+        let skills = discover(work.path(), true).unwrap().skills;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
             names.contains(&"evil"),
             "with --include-vendored, node_modules is walked: {names:?}"
         );
+    }
+
+    #[test]
+    fn discover_warns_on_case_insensitive_collision() {
+        let work = TempDir::new().unwrap();
+        write_skill(work.path(), "alpha", "---\nname: Foo\n---");
+        write_skill(work.path(), "bravo", "---\nname: foo\n---");
+        let out = discover(work.path(), false).unwrap();
+        assert_eq!(out.skills.len(), 2);
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("case-insensitive collision")
+                    && w.contains("foo")
+                    && w.contains("Foo")),
+            "expected a case-collision warning, got: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn discover_no_collision_warning_for_distinct_names() {
+        let work = TempDir::new().unwrap();
+        write_skill(work.path(), "a", "---\nname: alpha\n---");
+        write_skill(work.path(), "b", "---\nname: bravo\n---");
+        let out = discover(work.path(), false).unwrap();
+        assert!(
+            out.warnings.iter().all(|w| !w.contains("case-insensitive")),
+            "no collision warning expected, got: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn discover_warns_on_mixed_script_name() {
+        let work = TempDir::new().unwrap();
+        // Latin `a` followed by Cyrillic `а` (U+0430). Same glyph, different
+        // characters — classic homograph attack pattern.
+        let mixed = "cl\u{0430}ude"; // "claude" with Cyrillic а
+        write_skill(work.path(), "mixed", &format!("---\nname: {mixed}\n---"));
+        let out = discover(work.path(), false).unwrap();
+        assert_eq!(out.skills.len(), 1);
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("distinct Unicode scripts") || w.contains("mixes")),
+            "expected mixed-script warning, got: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn discover_no_warning_for_pure_ascii_or_pure_script() {
+        let work = TempDir::new().unwrap();
+        write_skill(work.path(), "ascii", "---\nname: claude-api\n---");
+        // Pure-Cyrillic name: no script mix.
+        write_skill(
+            work.path(),
+            "cyrillic",
+            "---\nname: \u{043F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}\n---",
+        );
+        let out = discover(work.path(), false).unwrap();
+        assert!(
+            out.warnings
+                .iter()
+                .all(|w| !w.contains("distinct Unicode scripts")),
+            "no homograph warning expected, got: {:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn mixes_distinct_scripts_unit() {
+        assert!(!super::mixes_distinct_scripts("claude"));
+        assert!(!super::mixes_distinct_scripts(
+            "\u{043A}\u{043B}\u{043E}\u{0434}"
+        )); // pure Cyrillic
+        assert!(!super::mixes_distinct_scripts("foo-123_bar.baz")); // ASCII + Common
+        assert!(super::mixes_distinct_scripts("cl\u{0430}ude")); // Latin + Cyrillic
+        assert!(super::mixes_distinct_scripts("a\u{4E00}")); // Latin + Han
     }
 
     #[test]
@@ -539,7 +691,7 @@ mod tests {
         std::fs::create_dir_all(&vendor_skill).unwrap();
         std::fs::write(vendor_skill.join("SKILL.md"), "---\nname: vendored\n---\n").unwrap();
 
-        let skills = discover(work.path(), false).unwrap();
+        let skills = discover(work.path(), false).unwrap().skills;
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"ok"));
         assert!(
@@ -642,7 +794,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(lib.path(), false).unwrap();
+        let skills = discover(lib.path(), false).unwrap().skills;
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "foo");
         assert!(

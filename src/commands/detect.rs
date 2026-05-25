@@ -77,8 +77,12 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         .map(|i| normalize_lexical(&cwd.join(&i.destination)))
         .collect();
 
-    let local_skills = skill::discover(&cwd, args.include_vendored)?;
-    let new_skills: Vec<Skill> = local_skills
+    let discovered = skill::discover(&cwd, args.include_vendored)?;
+    for w in &discovered.warnings {
+        ui::log_warning(ctx, w)?;
+    }
+    let new_skills: Vec<Skill> = discovered
+        .skills
         .into_iter()
         .filter(|s| {
             let canonical_match = std::fs::canonicalize(&s.path)

@@ -1,0 +1,52 @@
+name: Attest release artifacts
+
+# Runs once per GitHub Release publication, AFTER cargo-dist's release
+# workflow has uploaded all 17 binary assets. Downloads every asset and
+# signs it with an SLSA build-provenance attestation, which the SLSA
+# verifier (and `gh attestation verify`) can use to confirm the binary
+# came from this repo's release workflow at the corresponding tag.
+#
+# Why a separate workflow: cargo-dist regenerates `release.yml` from its
+# own templates, and inlining SLSA into the per-platform build jobs
+# would either fight cargo-dist on every dist-init or require
+# permissions: id-token: write to be threaded into multiple matrix jobs.
+# A standalone post-release workflow is simpler to reason about and
+# survives cargo-dist regeneration.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  # Required by actions/attest-build-provenance: it requests an OIDC token
+  # to identify the workflow to Sigstore's transparency log.
+  id-token: write
+  # Required to upload the attestation back to the release's asset bundle.
+  attestations: write
+  # Read the release metadata (tag, asset list).
+  contents: read
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir release-assets
+          # Skip the source tarballs (`*.tar.gz` / `*.zip` produced by
+          # GitHub itself) and the installers — only the binaries
+          # (`skillctl-*.tar.xz` / `*.zip`) need cryptographic provenance.
+          gh release download "$TAG" \
+            --dir release-assets \
+            --pattern 'skillctl-*-apple-darwin*' \
+            --pattern 'skillctl-*-unknown-linux-gnu*' \
+            --pattern 'skillctl-*-pc-windows-msvc*'
+          ls -la release-assets
+
+      - name: Attest binaries
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: 'release-assets/*'

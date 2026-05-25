@@ -1,6 +1,6 @@
 [package]
 name = "skillctl"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.85"
 description = "CLI to manage your personal agent skills library across projects"
@@ -35,6 +35,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 time = { version = "0.3.47", features = ["formatting"] }
 toml = "1.1.2"
+unicode-normalization = "0.1.24"
+unicode-script = "0.5.7"
 
 [dev-dependencies]
 tempfile = "3.14.0"

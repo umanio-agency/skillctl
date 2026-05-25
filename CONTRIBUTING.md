@@ -39,6 +39,19 @@ cargo test --all
 - Wrap body lines at ~72 chars.
 - **Do not** add `Co-Authored-By: Claude` (or any AI co-author) trailers, even if you used an AI assistant to draft the change. Stay consistent with the existing history.
 
+## Dependency policy
+
+`skillctl` uses Cargo's default caret semantics for direct dependencies in `Cargo.toml` (`anyhow = "1.0.102"` means `>=1.0.102, <2.0.0`). This is the standard Rust convention and lets us pick up patch + minor releases without manual intervention.
+
+Defenses we rely on:
+
+- **Direct deps are vetted at adoption time** — a new direct dep needs an issue + PR + reviewer sign-off, not a drive-by addition.
+- **`Cargo.lock` is committed** — the binary built for a release pins the exact transitive tree; users `cargo install`-ing build a fresh tree, but our release binaries and Homebrew formula are reproducible.
+- **`cargo audit` runs as a release gate** — any RustSec advisory against a pinned dep blocks the next tag.
+- **Transitive deps are not auto-updated** — `cargo update -p <crate>` is a deliberate action, not a recurring chore. If a transitive dep needs to move, the PR explains why.
+
+If you suspect a dep ships a semver-incorrect breaking change in a patch version, file an issue with a minimal reproduction. We have not had to pin around this so far, but the policy if we do is: explicit `=X.Y.Z` lock with a comment pointing to the upstream issue.
+
 ## PR process
 
 - Keep PRs focused; split unrelated changes into separate PRs.

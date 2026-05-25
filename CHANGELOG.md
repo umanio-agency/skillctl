@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-05-25
+
+### Security & robustness
+
+Close Phase 9.1 — five of the eight LOW findings that were explicitly deferred at v0.1.6. The remaining three (L11 cache-slug uniqueness, L14 fork destination prompt, plus the not-yet-numbered "deferred-with-reason" items from §10 of the internal audit) are gated on broader UX or migration decisions that warrant their own designs.
+
+- **APFS case-insensitive collision warning** (L6). Two skills named `Foo` and `foo` are distinct under skillctl's identifier-class validation (case-significant) but collapse to the same path on case-insensitive filesystems (APFS-CI on macOS external drives, HFS+, NTFS), so a subsequent `add` would silently clobber one with the other. `skill::discover` now groups skills by their lowercased name and surfaces a warning per collision group. Doesn't reject — case-insensitivity is host-dependent and operators on case-sensitive ext4/APFS-CS are fine — but lets the operator notice before something disappears.
+- **Homograph / mixed-script name warning** (L3). New `unicode-script` dependency (~20 KB). `skill::discover` checks each accepted skill name for characters spanning two or more distinct Unicode scripts (ignoring `Common` / `Inherited` / `Unknown` — digits, punctuation, emoji are exempt). A name like `clаude` (where the `а` is U+0430 Cyrillic, not U+0061 Latin) raises a warning so the operator can spot a homograph attack from a malicious library that publishes a skill visually indistinguishable from a legitimate one.
+- **NFC normalisation of paths in dedup** (L5). New `unicode-normalization` dependency (~100 KB). `path_safety::normalize_lexical` now Unicode-NFC-normalises every UTF-8 path component before returning. macOS HFS+ stores filenames in NFD (decomposed: `é` = `e` + combining acute) while Linux stores NFC (one codepoint); without this, the lexical dedup in `detect` and the `safe_join` comparisons treat the same logical filename as two distinct paths when the project crosses platforms. Non-UTF-8 components pass through unchanged.
+- **`skill::discover` now returns warnings instead of `eprintln!`** (infrastructure fix). The oversize-SKILL.md warning added in v0.1.6 used `eprintln!`, which bypasses `--json` gating. `discover` now returns a `DiscoverOutput { skills, warnings }`; callers in `add` / `list` / `detect` route each warning through `ui::log_warning`, which silently no-ops in `--json` mode. Closes a latent v0.1.6 footgun and makes L3 + L6 warnings JSON-safe at the same time.
+- **`actions/attest-build-provenance@v3` on every release** (L10). New `.github/workflows/attest.yml` triggers on the GitHub Release `published` event, downloads every binary asset, and generates a [SLSA build-provenance attestation](https://slsa.dev/spec/v1.0/levels) signed by GitHub Actions and recorded in Sigstore's transparency log. Users can verify a binary they downloaded with `gh attestation verify <file> --repo umanio-agency/skillctl` — a mismatch or missing attestation means the artifact wasn't produced by this repo's release workflow. Standalone workflow (not threaded into cargo-dist's generated `release.yml`) so it survives `cargo dist init` regenerations.
+- **Dependency policy documented** (L9). `CONTRIBUTING.md` gains a "Dependency policy" section spelling out the caret-semantics convention, the `Cargo.lock`-as-pinning trust path, `cargo audit` as a release gate, the no-auto-update transitive policy, and the response plan if a dep ships a semver-incorrect break.
+
+12 new unit tests (4 case-collision/homograph in `skill::tests`, 5 mixed-script unit cases, 1 NFC equality in `path_safety::tests`, 2 collision-suppression). `cargo test`: 153 pass; clippy clean; `cargo audit` clean.
+
+**Deferred to a future release** (with reasons):
+
+- **L11** (cache-slug uniqueness via hash suffix). Pre-v1 with one-library-at-a-time the slug collision is theoretical; revisit if/when multi-library support lands or two upstream `<owner>` namespaces produce a real conflict on the same dev machine.
+- **L14** (prompt operator on fork destination instead of inheriting source parent). UX question worth a dedicated `fork` flow review rather than a one-line nudge.
+
 ## [0.1.7] - 2026-05-25
 
 ### Release engineering

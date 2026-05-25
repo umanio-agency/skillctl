@@ -42,8 +42,12 @@ pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
         )?;
     }
 
-    let skills = skill::discover(&repo, false)?;
-    let filtered: Vec<_> = skills
+    let discovered = skill::discover(&repo, false)?;
+    for w in &discovered.warnings {
+        ui::log_warning(ctx, w)?;
+    }
+    let filtered: Vec<_> = discovered
+        .skills
         .into_iter()
         .filter(|s| matches_tags(&s.tags, &args.tags, args.all_tags))
         .collect();

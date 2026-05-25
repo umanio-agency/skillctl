@@ -54,3 +54,20 @@ The project is pre-v1; only the `main` branch is supported and security fixes la
 - **Homebrew:** always use the fully-qualified tap name — `brew install umanio-agency/homebrew-tap/skillctl`. Homebrew taps are namespaced by their GitHub owner, and anyone can create a `homebrew-tap` repo and publish a `skillctl.rb` formula. Pinning the owner (`umanio-agency`) prevents typo-squat attacks where a malicious tap is added before the official one.
 - **crates.io:** the published crate is `skillctl` (owner: `pinho.dcj@gmail.com`). The historical name `skills-cli` is owned by an unrelated third party and is **not** affiliated with this project.
 - **Direct binaries:** the `curl | sh` and PowerShell installers serve assets from `github.com/umanio-agency/skillctl/releases/latest/download/…` and verify SHA-256 sums published alongside each release.
+
+## Verifying release binaries
+
+Starting with v0.1.8, every binary in a GitHub Release ships with an [SLSA build-provenance attestation](https://slsa.dev/spec/v1.0/levels) signed by GitHub Actions and recorded in Sigstore's transparency log. The attestation proves the binary was produced by `umanio-agency/skillctl`'s release workflow on the corresponding tag — anyone who downloads the binary from somewhere else (a mirror, a cached fork, a tampered installer) will fail verification.
+
+To verify a binary you downloaded:
+
+```sh
+# Install the GitHub CLI if you don't have it: https://cli.github.com/
+gh auth login                                                # one-time
+gh attestation verify skillctl-x86_64-apple-darwin.tar.xz \
+  --repo umanio-agency/skillctl
+```
+
+A successful verification prints `Loaded digest sha256:... matches verified attestation`. A mismatch or missing attestation means the artifact was not produced by our release workflow — do not run it.
+
+If you install via `cargo install skillctl`, the binary is built locally from the crates.io source and SLSA verification does not apply (cargo registry tampering would need a separate trust path).

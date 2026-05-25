@@ -48,14 +48,22 @@ pub fn safe_join(base: &Path, untrusted: impl AsRef<Path>) -> Result<PathBuf, Ap
 }
 
 /// Lexically normalise a path: collapse `./` and resolve `..` components
-/// without touching the filesystem. Used by callers that want a stable
-/// dedup key for paths that may or may not exist on disk (so
-/// `fs::canonicalize` can't be used uniformly).
+/// without touching the filesystem, AND normalise each path component to
+/// Unicode NFC (Canonical Composition). Used by callers that want a
+/// stable dedup key for paths that may or may not exist on disk.
+///
+/// The NFC step matters on macOS: HFS+ stores filenames in NFD
+/// (decomposed: `é` = `e` + combining acute), while a path typed by the
+/// operator or sourced from a Linux library is typically NFC (`é` is one
+/// codepoint). Without normalisation, `safe_join` / dedup compares those
+/// as distinct paths even though they refer to the same file. With
+/// normalisation, both forms collapse to NFC and compare equal.
 ///
 /// Note: this is purely string-level. `a/b/../c` becomes `a/c`, but if
 /// `a/b` is a symlink to elsewhere, the lexical and physical paths
 /// diverge. Use only for dedup, never for trust decisions.
 pub fn normalize_lexical(p: &Path) -> PathBuf {
+    use unicode_normalization::UnicodeNormalization;
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
@@ -65,7 +73,15 @@ pub fn normalize_lexical(p: &Path) -> PathBuf {
                     out.push(Component::ParentDir);
                 }
             }
-            other => out.push(other.as_os_str()),
+            other => {
+                let os = other.as_os_str();
+                // NFC only applies to UTF-8 strings; non-UTF-8 components
+                // (rare on Unix, never on Windows) pass through unchanged.
+                match os.to_str() {
+                    Some(s) => out.push::<PathBuf>(s.nfc().collect::<String>().into()),
+                    None => out.push(os),
+                }
+            }
         }
     }
     out
@@ -195,6 +211,20 @@ mod tests {
         assert_eq!(
             normalize_lexical(Path::new("../escape")),
             PathBuf::from("../escape")
+        );
+    }
+
+    #[test]
+    fn normalize_unifies_nfc_and_nfd_forms() {
+        // `café` in NFC: `c`, `a`, `f`, `é` (U+00E9)
+        // `café` in NFD: `c`, `a`, `f`, `e`, U+0301 (combining acute)
+        // Both should normalise to the same NFC string.
+        let nfc = "caf\u{00E9}";
+        let nfd = "cafe\u{0301}";
+        assert_eq!(
+            normalize_lexical(Path::new(nfc)),
+            normalize_lexical(Path::new(nfd)),
+            "NFC and NFD forms of the same string must compare equal"
         );
     }
 }

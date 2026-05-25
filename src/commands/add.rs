@@ -74,7 +74,11 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
         )?;
     }
 
-    let skills = skill::discover(&library_root, false)?;
+    let discovered = skill::discover(&library_root, false)?;
+    for w in &discovered.warnings {
+        ui::log_warning(ctx, w)?;
+    }
+    let skills = discovered.skills;
     if skills.is_empty() {
         ui::outro(ctx, format!("no skills found in {}", library.url))?;
         emit_json(ctx, None, &[]);
