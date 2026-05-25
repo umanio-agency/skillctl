@@ -57,7 +57,13 @@ jobs:
           mkdir release-assets
           # Skip the source tarballs and installers — only the binaries
           # (`skillctl-*.tar.xz` / `*.zip`) need cryptographic provenance.
+          # `--repo` is required because we don't `actions/checkout` first
+          # (the workflow doesn't need the source tree — only the binaries
+          # from the release). Without it, `gh` tries to infer the repo
+          # from the working directory's git config and fails with
+          # "not a git repository".
           gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
             --dir release-assets \
             --pattern 'skillctl-*-apple-darwin*' \
             --pattern 'skillctl-*-unknown-linux-gnu*' \
