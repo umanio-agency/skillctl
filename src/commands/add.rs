@@ -58,7 +58,7 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skillctl init{}` again",
-            library_root.display(),
+            fs_util::display_path(&library_root),
             library.url
         ))
         .into());
@@ -104,20 +104,43 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     let mut aborted = false;
 
     for skill in selected {
-        let folder_name = skill.path.file_name().ok_or_else(|| {
-            AppError::Config(format!(
-                "skill has no folder name: {}",
-                skill.path.display()
-            ))
-        })?;
-        let dest = dest_root.join(folder_name);
+        let folder_name = match skill.path.file_name() {
+            Some(n) => n.to_os_string(),
+            None => {
+                let _ = ui::log_warning(
+                    ctx,
+                    format!(
+                        "skipping {}: source has no folder name ({})",
+                        skill.name,
+                        skill.path.display()
+                    ),
+                );
+                results.push(json!({
+                    "name": skill.name,
+                    "status": "failed",
+                    "reason": "source has no folder name",
+                }));
+                continue;
+            }
+        };
+        let dest = dest_root.join(&folder_name);
 
         if dest.exists() {
             let action = resolve_conflict(ctx, &dest, conflict_policy.clone())?;
             match action {
                 ConflictAction::Overwrite => {
-                    fs::remove_dir_all(&dest)
-                        .with_context(|| format!("removing {}", dest.display()))?;
+                    if let Err(e) = fs::remove_dir_all(&dest)
+                        .with_context(|| format!("removing {}", dest.display()))
+                    {
+                        let _ =
+                            ui::log_warning(ctx, format!("add failed for `{}`: {e}", skill.name));
+                        results.push(json!({
+                            "name": skill.name,
+                            "status": "failed",
+                            "reason": e.to_string(),
+                        }));
+                        continue;
+                    }
                 }
                 ConflictAction::Skip => {
                     ui::log_info(ctx, format!("skipped {}", skill.name))?;
@@ -129,6 +152,9 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                     continue;
                 }
                 ConflictAction::Abort => {
+                    // Save what's been installed up to this point before
+                    // bailing — we may already have pushed entries for
+                    // earlier-loop-iteration skills.
                     project_config::save(&cwd, &project_cfg)?;
                     ui::outro_cancel(ctx, "aborted")?;
                     results.push(json!({
@@ -142,35 +168,67 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
             }
         }
 
-        fs_util::copy_dir_all(&skill.path, &dest)?;
-        let source_path = skill
-            .path
-            .strip_prefix(&library_root)
-            .with_context(|| {
-                format!(
-                    "computing path of {} relative to library at {}",
-                    skill.path.display(),
-                    library_root.display()
-                )
-            })?
-            .to_path_buf();
-        let destination_rel = fs_util::relative_to_or_self(&dest, &cwd);
-        project_cfg.installed.push(InstalledSkill {
-            name: skill.name.clone(),
-            source_path,
-            source_sha: source_sha.clone(),
-            destination: destination_rel.clone(),
-            installed_at: installed_at.clone(),
-        });
-        ui::log_success(ctx, format!("{} → {}", skill.name, dest.display()))?;
-        results.push(json!({
-            "name": skill.name,
-            "status": "installed",
-            "path": destination_rel.display().to_string(),
-            "source_sha": source_sha,
-        }));
+        // Per-skill IIFE: a single skill's copy failure (symlink reject,
+        // hardlink reject, FIFO inside, oversize SKILL.md, ...) logs and
+        // continues with the next skill instead of aborting the batch and
+        // orphaning partial work. The final `project_config::save` below
+        // captures every successful entry, so a half-finished `--all` run
+        // still produces a usable `.skills.toml`.
+        let outcome: Result<InstalledSkill> = (|| {
+            fs_util::copy_dir_all(&skill.path, &dest)?;
+            let source_path = skill
+                .path
+                .strip_prefix(&library_root)
+                .with_context(|| {
+                    format!(
+                        "computing path of {} relative to library at {}",
+                        skill.path.display(),
+                        library_root.display()
+                    )
+                })?
+                .to_path_buf();
+            let destination_rel = fs_util::relative_to_or_self(&dest, &cwd);
+            Ok(InstalledSkill {
+                name: skill.name.clone(),
+                source_path,
+                source_sha: source_sha.clone(),
+                destination: destination_rel,
+                installed_at: installed_at.clone(),
+            })
+        })();
+        match outcome {
+            Ok(entry) => {
+                let dest_display = entry.destination.display().to_string();
+                let source_sha_for_json = entry.source_sha.clone();
+                project_cfg.installed.push(entry);
+                ui::log_success(ctx, format!("{} → {}", skill.name, dest.display()))?;
+                results.push(json!({
+                    "name": skill.name,
+                    "status": "installed",
+                    "path": dest_display,
+                    "source_sha": source_sha_for_json,
+                }));
+            }
+            Err(e) => {
+                // Best-effort cleanup of any partial copy left behind by
+                // copy_dir_all's tempdir-or-final-rename path. The atomic
+                // swap pattern means dst is either old or new content, so
+                // there's typically nothing to undo — but if the failure
+                // happened during the staging copy we may still have a
+                // `.skillctl-tmp.*` sibling around (it normally cleans
+                // itself up; this is a paranoid sweep).
+                let _ = ui::log_warning(ctx, format!("add failed for `{}`: {e}", skill.name));
+                results.push(json!({
+                    "name": skill.name,
+                    "status": "failed",
+                    "reason": e.to_string(),
+                }));
+            }
+        }
     }
 
+    // Always save: captures both fully-successful batches and partial
+    // successes after one or more per-skill failures.
     project_config::save(&cwd, &project_cfg)?;
 
     if !aborted {

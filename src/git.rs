@@ -97,8 +97,15 @@ pub fn ensure_available() -> Result<()> {
 }
 
 pub fn clone(url: &str, dest: &Path) -> Result<()> {
+    // `--no-recurse-submodules` defends against a malicious library that
+    // adds a `.gitmodules` pointing at an attacker-controlled repo: without
+    // this flag, `git clone` would recursively pull and check out those
+    // submodules during `skillctl init`, landing arbitrary content in the
+    // library cache. Skills do not use submodules; if a legitimate use
+    // case appears, it can be opt-in via an explicit flag later.
     let status = git_cmd()
         .arg("clone")
+        .arg("--no-recurse-submodules")
         .arg(url)
         .arg(dest)
         .status()
@@ -336,6 +343,17 @@ pub fn commit(repo: &Path, message: &str) -> Result<String> {
         ));
     }
     head_sha(repo)
+}
+
+/// Reset `repo` to its parent commit (`HEAD~1`), discarding the most
+/// recent commit AND its working-tree / index changes. Used by `push` /
+/// `detect` to undo the just-created commit when `git push` fails — the
+/// commit otherwise sits orphaned in the local cache, ahead of upstream,
+/// and the next `fetch_and_fast_forward` would silently `reset --hard
+/// @{upstream}` it away (or refuse, post-M10, if the working tree happened
+/// to get dirty in between). Better to make the rollback explicit.
+pub fn reset_hard_to_parent(repo: &Path) -> Result<()> {
+    run_git(repo, &["reset", "--quiet", "--hard", "HEAD~1"])
 }
 
 pub fn push(repo: &Path) -> Result<()> {

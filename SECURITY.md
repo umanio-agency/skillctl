@@ -7,6 +7,35 @@
 - It reads YAML-like frontmatter from `SKILL.md` files and writes TOML to `.skills.toml` and the global config file.
 - There is no network surface beyond what `git` does, no privileged operations, and no telemetry.
 
+## Trust model
+
+`skillctl`'s internal validation and sanitisation is shaped by the following trust boundaries. External auditors and contributors should focus probes on the **adversarial** category — anything in the **trusted** category is taken at face value.
+
+**Trusted (taken at face value):**
+
+- The operator's machine — filesystem, `$PATH`, environment variables, git binary, git's configured credentials.
+- Flags typed by the operator on an interactive TTY. When skillctl runs interactively, `--dest <absolute-path>` and other path-accepting flags are accepted as-is.
+- The skillctl binary itself, its dependencies (audited via `cargo audit` on every release), and the configuration written to the per-user config file (which only skillctl writes).
+
+**Semi-trusted (the operator chose the source but its content is treated as adversarial):**
+
+- The library repository URL passed to `skillctl init`. The host (GitHub) is trusted; the *content* it serves is not.
+- The library cache (`~/Library/Caches/dev.umanio-agency.skills-cli/<slug>/`). Skillctl owns the directory but treats every file under it as adversarial after the initial clone.
+
+**Adversarial (treated as untrusted in every code path that touches them):**
+
+- `SKILL.md` frontmatter (`name`, `description`, `tags`) from any source — library cache, project tree, fork-locally targets. Sanitised at the discovery boundary; control bytes / ANSI / NUL / CRLF are rejected; oversize files (> 1 MiB) are refused.
+- `.skills.toml` entries, especially those that arrive via PR. `name`, `source_path`, `source_sha`, `destination` are validated at load: identifier-class for `name`, hex regex for `source_sha`, lexical subpath check (no `..`, no absolute, no Windows prefix) for the two `PathBuf` fields. Duplicates and unknown fields are rejected.
+- The library cache's git working tree and submodules. `git clone --no-recurse-submodules` blocks submodule pull-through; every git invocation runs with `-c core.hooksPath=/dev/null` so a malicious library cannot ship hook scripts.
+- Skill folder contents: symlinks, hardlinks (Unix), FIFOs, devices, and sockets are refused at copy time. File modes are masked to `0o644 | (src_mode & 0o100)` on Unix — only the user-execute bit propagates.
+- Non-interactive flag values (`--dest <path>` in `--json` / `--no-interaction` mode, where the "operator" may be an LLM running on attacker-supplied input). Absolute paths are rejected; `..` is always rejected.
+
+**Out of scope (not defended against):**
+
+- A compromised git binary or local credential helper. Skillctl uses whatever git you point it at; if `which git` returns a trojan, all bets are off.
+- A compromised library repository owned by a third party that the operator explicitly trusts (e.g. corporate skills repo). Skillctl reduces blast radius via the controls above, but cannot make a malicious-but-trusted library safe.
+- Side-channel attacks via filesystem timing, memory analysis, or OS-level surveillance. The threat model assumes a normal single-user developer machine.
+
 ## Reporting a vulnerability
 
 If you find a security issue (e.g. a way to make `skillctl` write outside the destinations it's supposed to, or to leak credentials in error messages), please report it privately:

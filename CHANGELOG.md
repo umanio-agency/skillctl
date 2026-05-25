@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-05-25
+
+### Robustness & hygiene
+
+Close the audit's Phase 8.4 "low-impact polish" batch: 9 of the 17 remaining LOW findings, plus a new "Trust model" section in SECURITY.md that documents the boundaries underlying all the v0.1.2 → v0.1.6 hardening work. The 8 deferred LOW items either need a new runtime dependency (homograph detection, Unicode normalization), require a release-workflow change (SLSA provenance), or interact with pre-v1 design questions (slug-collision uniqueness, fork-destination UX).
+
+- **Force HTTPS in library URLs** (L1). `skillctl init http://github.com/owner/repo` was previously accepted and silently downgraded to cleartext for the initial clone. A network attacker on the operator's link could MITM the response and serve modified content. Now `slug_for_url` rejects `http://` with a clear "use HTTPS instead" message. SSH (`git@host:`, `ssh://`) is unchanged.
+- **UTF-8 BOM stripped before frontmatter parse** (L2). Some editors (Notepad on Windows, occasionally VS Code) prepend a `\u{feff}` BOM to UTF-8 files. The frontmatter parser saw `\u{feff}---` instead of `---` and treated the whole SKILL.md as "no frontmatter." Now the parser strips a leading BOM before checking the opening fence.
+- **Balanced quotes enforced in `clean_value`** (L4). `clean_value` was using `trim_matches(|c| c == '"' || c == '\'')` which silently stripped mismatched quotes — `"foo'` became `foo`. Mismatched quotes now pass through unchanged so the operator sees the malformed value and can fix it.
+- **`git push` failure rolls back the just-created commit** (L7). When `git commit` succeeds but `git push` fails (network blip, auth expiry), the local commit sat orphaned in the cache, ahead of upstream. The next `fetch_and_fast_forward` would silently `reset --hard @{upstream}` it away — or, post-M10, refuse to refresh because the working tree happened to get dirty in between. New `git::reset_hard_to_parent` helper, wired into both `push` and `detect`, restores the cache to a clean state on push failure.
+- **SKILL.md read capped at 1 MiB** (L8). `std::fs::read_to_string` for SKILL.md was unbounded — a 5 GiB file would be slurped silently into RAM during `discover`. New `read_skill_md_bounded` helper refuses to load more than 1 MiB and surfaces a per-skill warning instead.
+- **Submodule recursion disabled** (L12 + L13). `git clone` now passes `--no-recurse-submodules` explicitly so a malicious library with a `.gitmodules` pointing at attacker-controlled repos cannot pull-through during `skillctl init`. The cargo-dist release workflow's `actions/checkout` steps switched from `submodules: recursive` to `submodules: false` (we have no submodules; this is defense-in-depth that survives the next `cargo dist init` regeneration). Skills do not use submodules; if a legitimate use case appears, it can be opt-in via an explicit flag later.
+- **`add` continues on per-skill failure** (L15). The apply loop in `add` used `?` for `fs::remove_dir_all`, `copy_dir_all`, and the `source_path` strip-prefix — a single per-skill failure aborted the whole batch, and `.skills.toml` was only saved at the end, so partial successes were untracked. Now each skill is wrapped in an IIFE that logs a warning + continues on failure, and `project_config::save` always runs (capturing partial state). Same pattern as `pull` (v0.1.4) and `push` (v0.1.5).
+- **`$HOME` rendered as `~/` in displayed paths** (L17). Absolute paths in error messages and JSON output (`library cache not found at /Users/<operator>/Library/Caches/...`) leaked the operator's Unix username into CI logs and agent-mode JSON. New `fs_util::display_path(&path)` swaps a leading `$HOME` with `~/` and is applied at every "library cache not found" / cache-path-display site.
+- **`list`'s `eprintln!` routed through `ui::log_warning`** (L18). A single bare `eprintln!("warning: could not refresh library cache (...)")` in `list` bypassed the `--json` gating, polluting JSON consumers' stderr with non-JSON text. Now routed through the shared `ui::log_warning` helper, which is JSON-aware.
+- **SECURITY.md trust-model section**. New section that explicitly names the three trust boundaries — Trusted (operator's machine, interactive flags, the binary itself), Semi-trusted (library URL and cache), Adversarial (frontmatter, `.skills.toml`, git working tree, non-interactive flag values) — plus an explicit Out-of-scope list (compromised git binary, side-channel attacks). External auditors and contributors can now know where to look without reverse-engineering the code.
+
+11 new unit tests (1 HTTPS-required, 1 BOM strip, 4 balanced-quote, 2 SKILL.md size cap, 3 `$HOME` rendering). `cargo test`: 147 pass; clippy clean; `cargo audit` clean.
+
+**Deferred to a future release** (with reasons, since v0.1.6 explicitly chose to keep the scope minimal):
+
+- **L3** (homograph warning, e.g. Cyrillic `а` vs Latin `a` in skill names). Needs a `unicode-confusables` (or similar) dep; warrants its own decision before adding a runtime crate.
+- **L5** (NFC normalisation of paths/names). Needs `unicode-normalization`; same reasoning.
+- **L6** (case-insensitive FS collision warning on APFS-CI). No new dep but ~30 lines of runtime logic; deferred to a UX-focused release.
+- **L9** (Cargo.toml caret-semantics doc). Documentation-only; will land alongside a broader contributor-docs pass.
+- **L10** (SLSA provenance / cosign attestations on release binaries). Release-workflow change; deserves its own PR + dry-run on a tag.
+- **L11** (cache-slug collision via hash suffix). Pre-v1 with one-library-at-a-time, slug collisions are theoretical only; revisit if multi-library support lands.
+- **L14** (prompt operator on fork destination instead of inheriting the source's parent). UX question best decided alongside a broader `fork` flow review.
+
 ## [0.1.5] - 2026-05-22
 
 ### Security & robustness

@@ -85,7 +85,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skillctl init{}` again",
-            library_root.display(),
+            fs_util::display_path(&library_root),
             library.url
         ))
         .into());

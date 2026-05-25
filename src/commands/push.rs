@@ -100,7 +100,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     if !library_root.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skillctl init{}` again",
-            library_root.display(),
+            fs_util::display_path(&library_root),
             library.url
         ))
         .into());
@@ -424,7 +424,19 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .unwrap_or_else(|| build_commit_message(&updates, &adds));
 
     let new_sha = git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
-    git::push(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
+    // If `push` fails the just-created commit sits orphaned in the cache,
+    // ahead of upstream. Roll it back explicitly so the cache returns to
+    // a clean `@{upstream}`-matching state — much friendlier for the
+    // operator than the M10 porcelain check refusing to refresh next run.
+    if let Err(e) = git::push(&library_root) {
+        if let Err(rollback_err) = git::reset_hard_to_parent(&library_root) {
+            let _ = ui::log_warning(
+                ctx,
+                format!("could not roll back the local commit after push failure: {rollback_err}"),
+            );
+        }
+        return Err(AppError::Git(e.to_string()).into());
+    }
 
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)

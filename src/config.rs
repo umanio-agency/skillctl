@@ -84,14 +84,22 @@ pub fn sanitize_url_for_display(url: &str) -> String {
 }
 
 /// Derive a stable cache folder name from a GitHub URL: `owner-repo`.
+///
+/// Accepts only HTTPS (`https://github.com/owner/repo`) or SSH
+/// (`git@github.com:owner/repo`) forms. Plain `http://` is rejected so a
+/// network attacker on the operator's link cannot downgrade the clone to
+/// cleartext — GitHub itself redirects `http://` to `https://`, but a MITM
+/// could intercept the initial connection and serve modified content.
 fn slug_for_url(url: &str) -> Result<String> {
     let trimmed = url.trim().trim_end_matches('/').trim_end_matches(".git");
     let tail = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
         rest
     } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
-        rest
+    } else if trimmed.starts_with("http://") {
+        return Err(anyhow!(
+            "refusing to use cleartext HTTP URL: {url} — use the HTTPS form (`https://github.com/owner/repo`) instead"
+        ));
     } else {
         return Err(anyhow!(
             "unsupported URL: {url} — expected a GitHub HTTPS or SSH URL"
@@ -185,6 +193,17 @@ mod tests {
     #[test]
     fn slug_rejects_non_github() {
         assert!(slug_for_url("https://gitlab.com/foo/bar").is_err());
+    }
+
+    #[test]
+    fn slug_rejects_cleartext_http() {
+        let err = slug_for_url("http://github.com/foo/bar")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cleartext") || err.contains("HTTPS"),
+            "expected HTTPS-required error, got: {err}"
+        );
     }
 
     #[test]

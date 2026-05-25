@@ -259,6 +259,36 @@ pub fn strip_dot_prefix(p: PathBuf) -> PathBuf {
     p.strip_prefix(".").map(Path::to_path_buf).unwrap_or(p)
 }
 
+/// Render a path for display, swapping a leading `$HOME` (resolved at
+/// runtime from the environment) with `~/`. Used in error messages,
+/// JSON output, and operator-facing logs to avoid leaking the
+/// operator's Unix username (`/Users/<name>/...`) into CI logs and
+/// agent-mode JSON consumed by third parties.
+///
+/// Falls back to the raw path when `HOME` is unset (CI tasks running
+/// as a service user, Windows without an HOME translation, etc.) or
+/// when the path doesn't share the `$HOME` prefix.
+pub fn display_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME");
+    display_path_with_home(path, home.as_deref().map(Path::new))
+}
+
+// Inner implementation. Split out so tests can inject a known HOME
+// without touching `std::env` (which is unsafe to set under cargo's
+// parallel-test execution model in edition 2024).
+fn display_path_with_home(path: &Path, home: Option<&Path>) -> String {
+    if let Some(home_path) = home
+        && !home_path.as_os_str().is_empty()
+        && let Ok(rest) = path.strip_prefix(home_path)
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +563,40 @@ mod tests {
             .mode()
             & 0o7777;
         assert_eq!(dst_mode, 0o644, "expected 0o644, got 0o{:o}", dst_mode);
+    }
+
+    #[test]
+    fn display_path_renders_home_as_tilde() {
+        let home = Path::new("/Users/test");
+        assert_eq!(
+            display_path_with_home(Path::new("/Users/test/Library/Caches/foo"), Some(home)),
+            "~/Library/Caches/foo"
+        );
+        assert_eq!(
+            display_path_with_home(Path::new("/Users/test"), Some(home)),
+            "~"
+        );
+    }
+
+    #[test]
+    fn display_path_leaves_paths_outside_home_alone() {
+        let home = Path::new("/Users/test");
+        assert_eq!(
+            display_path_with_home(Path::new("/etc/passwd"), Some(home)),
+            "/etc/passwd"
+        );
+        assert_eq!(
+            display_path_with_home(Path::new("/Users/someone-else/file"), Some(home)),
+            "/Users/someone-else/file"
+        );
+    }
+
+    #[test]
+    fn display_path_falls_back_when_home_unset() {
+        assert_eq!(
+            display_path_with_home(Path::new("/Users/test/foo"), None),
+            "/Users/test/foo"
+        );
     }
 
     #[test]

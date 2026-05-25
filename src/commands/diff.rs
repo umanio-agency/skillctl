@@ -59,7 +59,7 @@ pub fn classify(
         None => {
             return Err(anyhow::anyhow!(
                 "library HEAD doesn't resolve in the cache at {}",
-                library_root.display()
+                crate::fs_util::display_path(library_root)
             ));
         }
     };

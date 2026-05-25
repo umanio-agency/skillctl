@@ -9,6 +9,7 @@ use crate::error::AppError;
 use crate::git;
 use crate::lock;
 use crate::skill;
+use crate::ui;
 
 pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
     let cfg = config::load()?;
@@ -21,7 +22,7 @@ pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
     if !repo.exists() {
         return Err(AppError::Config(format!(
             "library cache not found at {} — run `skillctl init{}` again",
-            repo.display(),
+            crate::fs_util::display_path(&repo),
             library.url
         ))
         .into());
@@ -31,10 +32,14 @@ pub fn run(args: ListArgs, ctx: &Context) -> Result<()> {
     // or `pull`. Released on function return.
     let _cache_lock = lock::acquire_exclusive(&repo, "library cache")?;
 
-    if let Err(e) = git::fetch_and_fast_forward(&repo)
-        && !ctx.json
-    {
-        eprintln!("warning: could not refresh library cache ({e}); using cached version");
+    if let Err(e) = git::fetch_and_fast_forward(&repo) {
+        // log_warning silently no-ops under --json (it routes through the
+        // shared ui helper which respects the JSON output contract), so we
+        // no longer need a separate ctx.json gate at this call site.
+        ui::log_warning(
+            ctx,
+            format!("could not refresh library cache ({e}); using cached version"),
+        )?;
     }
 
     let skills = skill::discover(&repo, false)?;

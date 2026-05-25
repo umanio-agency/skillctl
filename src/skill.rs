@@ -1,9 +1,36 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 
 use crate::sanitize::{validate_identifier, validate_message_safe};
+
+/// Hard cap on the bytes we will read from a SKILL.md. The parser only
+/// looks at the frontmatter (already bounded at MAX_FRONTMATTER_LINES);
+/// the rest of the body is prose for the agent, not for us. A 1 MiB cap
+/// is generous for any legitimate SKILL.md and stops a 5 GiB file from
+/// being silently slurped into memory during `discover`.
+const MAX_SKILL_MD_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Read a SKILL.md, refusing to load more than [`MAX_SKILL_MD_BYTES`].
+/// If the file exceeds the cap we return an error rather than truncating,
+/// because a truncated frontmatter could be silently mis-parsed.
+fn read_skill_md_bounded(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut take = file.take((MAX_SKILL_MD_BYTES as u64) + 1);
+    let mut buf = Vec::with_capacity(8 * 1024);
+    take.read_to_end(&mut buf)
+        .with_context(|| format!("reading {}", path.display()))?;
+    if buf.len() > MAX_SKILL_MD_BYTES {
+        return Err(anyhow::anyhow!(
+            "refusing to read {}: file exceeds {} bytes (this is unusual for a SKILL.md and would force unbounded memory use)",
+            path.display(),
+            MAX_SKILL_MD_BYTES
+        ));
+    }
+    String::from_utf8(buf).with_context(|| format!("{} is not valid UTF-8", path.display()))
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Skill {
@@ -59,8 +86,18 @@ pub fn discover(root: &Path, include_vendored: bool) -> Result<Vec<Skill>> {
             .and_then(|n| n.to_str())
             .unwrap_or("(unknown)")
             .to_string();
-        let raw = std::fs::read_to_string(skill_md)
-            .with_context(|| format!("reading {}", skill_md.display()))?;
+        let raw = match read_skill_md_bounded(skill_md) {
+            Ok(s) => s,
+            Err(e) => {
+                // A SKILL.md that exceeds the cap or fails to read at all is
+                // a per-skill problem, not a reason to abort the whole walk.
+                // Dropping it from discovery means it cannot be added,
+                // pushed, or detected — surface this once via a stderr-side
+                // hint and continue.
+                eprintln!("warning: skipping {}: {e}", skill_md.display());
+                continue;
+            }
+        };
         let (name, description, tags) = parse_frontmatter(&raw);
         let resolved_name = name.unwrap_or_else(|| folder_name.clone());
         // Sanitisation at the discovery boundary: a malicious library may
@@ -131,6 +168,12 @@ const MAX_FRONTMATTER_LINES: usize = 200;
 /// `---` is missing OR if the closing `---` is not seen within
 /// [`MAX_FRONTMATTER_LINES`] lines.
 fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    // Strip a leading UTF-8 BOM (U+FEFF, encoded as `EF BB BF`). Common
+    // editors (Notepad on Windows, sometimes VS Code on first save with a
+    // certain encoding setting) add one silently — without this strip the
+    // first line is `\u{FEFF}---` instead of `---` and the whole file is
+    // treated as "no frontmatter."
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let mut lines = raw.lines().take(MAX_FRONTMATTER_LINES + 1).peekable();
     if lines.next().map(str::trim) != Some("---") {
         return (None, None, Vec::new());
@@ -220,8 +263,7 @@ pub fn read_tags(skill_md: &Path) -> Result<Vec<String>> {
     if !skill_md.exists() {
         return Ok(Vec::new());
     }
-    let raw = std::fs::read_to_string(skill_md)
-        .with_context(|| format!("reading {}", skill_md.display()))?;
+    let raw = read_skill_md_bounded(skill_md)?;
     let (_, _, tags) = parse_frontmatter(&raw);
     // Mirror the sanitisation in `discover`: filter out tags with control
     // bytes so a malicious local SKILL.md cannot inject ANSI/OSC-8 into
@@ -232,10 +274,22 @@ pub fn read_tags(skill_md: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Strip a balanced pair of wrapping quotes (`"..."` or `'...'`) from a
+/// scalar value. Mismatched quotes (`"foo'`) are left as-is — silently
+/// stripping them used to mask malformed input and let mixed-quote values
+/// flow downstream where they could be mis-parsed by tools that don't
+/// share our tolerance.
 fn clean_value(raw: &str) -> String {
-    raw.trim()
-        .trim_matches(|c| c == '"' || c == '\'')
-        .to_string()
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2 {
+        let first = trimmed.chars().next();
+        let last = trimmed.chars().next_back();
+        if (first == Some('"') && last == Some('"')) || (first == Some('\'') && last == Some('\''))
+        {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 /// Parse the inline-array tag form: `[a, b, "c"]`. Empty input or `[]` returns
@@ -510,6 +564,59 @@ mod tests {
         );
         assert!(desc.is_none());
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn read_skill_md_bounded_rejects_oversize() {
+        let work = TempDir::new().unwrap();
+        let path = work.path().join("BIG.md");
+        // 1 MiB + 1 byte. The cap rejects on > MAX_SKILL_MD_BYTES, so we
+        // need at least one extra byte over the cap.
+        let mut content = vec![b'x'; super::MAX_SKILL_MD_BYTES + 1];
+        content[0] = b'-';
+        std::fs::write(&path, &content).unwrap();
+        let err = super::read_skill_md_bounded(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds") || err.contains("unbounded"),
+            "expected oversize error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_skill_md_bounded_accepts_just_under_cap() {
+        let work = TempDir::new().unwrap();
+        let path = work.path().join("OK.md");
+        std::fs::write(&path, vec![b'x'; super::MAX_SKILL_MD_BYTES]).unwrap();
+        assert!(super::read_skill_md_bounded(&path).is_ok());
+    }
+
+    #[test]
+    fn strips_utf8_bom_before_frontmatter() {
+        let raw = "\u{feff}---\nname: foo\n---\n";
+        let (name, _, _) = parse_frontmatter(raw);
+        assert_eq!(name.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn balanced_double_quotes_stripped() {
+        assert_eq!(clean_value("\"foo\""), "foo");
+    }
+
+    #[test]
+    fn balanced_single_quotes_stripped() {
+        assert_eq!(clean_value("'foo'"), "foo");
+    }
+
+    #[test]
+    fn mismatched_quotes_left_as_is() {
+        assert_eq!(clean_value("\"foo'"), "\"foo'");
+        assert_eq!(clean_value("'foo\""), "'foo\"");
+    }
+
+    #[test]
+    fn unquoted_value_passes_through() {
+        assert_eq!(clean_value("foo"), "foo");
+        assert_eq!(clean_value("  foo  "), "foo");
     }
 
     #[test]
