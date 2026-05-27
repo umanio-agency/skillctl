@@ -29,6 +29,7 @@ fn main() -> std::process::ExitCode {
         Command::Push(args) => commands::push::run(args, &ctx),
         Command::Pull(args) => commands::pull::run(args, &ctx),
         Command::Detect(args) => commands::detect::run(args, &ctx),
+        Command::Remove(args) => commands::remove::run(args, &ctx),
     };
     match result {
         Ok(()) => ExitCode::Success.into(),

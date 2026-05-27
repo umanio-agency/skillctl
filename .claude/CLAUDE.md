@@ -23,6 +23,7 @@ Core flows the CLI must support:
 - `push`     — project → library (propagate local edits)
 - `fork`     — project → library as a *new* skill (when local edits should not overwrite the original)
 - `detect`   — project → library (find new skills created locally and offer to add them)
+- `remove`   — project-only (delete installed/local skill folders and drop their `.skills.toml` entries; never touches the library or git)
 
 ## Conventions
 - Prefer typed errors (`thiserror` / `anyhow` at the binary edge) over `unwrap`/`expect` outside tests.

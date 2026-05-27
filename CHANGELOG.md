@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-27
+
+### Added
+
+- **`skillctl remove`** — remove skills from the current project. Lists every removable skill (installed via skillctl, created locally, or an orphaned `.skills.toml` entry whose folder is already gone), with each kind distinguished in the selection list, and lets you pick by interactive multi-select, by name (`--skill <name>`, repeatable), or all at once (`--all`). Deletes the selected skill folders and drops their `.skills.toml` entries; `.skills.toml` is only rewritten when a tracked entry actually changes. The command is project-only — it never touches the library or git.
+
+### Security
+
+- The removal path refuses to follow a symlink: the destination's type is re-checked immediately before deletion, so a folder swapped for a symlink cannot redirect the recursive delete outside the project (closes a TOCTOU window surfaced by the pre-release audit). A symlinked destination is treated as "no folder on disk" — only its manifest entry can be dropped, never deleted through.
+- `--skill <name>` fails closed: an unknown name errors, and a name shared by two skills errors as ambiguous rather than silently deleting the wrong folder. The project root, `.git`, and `.skills.toml` can never be selected for deletion.
+
+`skillctl remove` was reviewed before release with the project's standard multi-agent security audit pass (FS-safety / untrusted-input / logic dimensions). 5 new unit tests; `cargo test`: 158 pass; clippy clean; `cargo audit` clean.
+
 ## [0.1.8] - 2026-05-25
 
 ### Security & robustness

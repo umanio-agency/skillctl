@@ -39,6 +39,8 @@ pub enum Command {
     Pull(PullArgs),
     /// Find skills created locally and offer to add them to the library.
     Detect(DetectArgs),
+    /// Remove skills from the current project (folder + any .skills.toml entry).
+    Remove(RemoveArgs),
 }
 
 #[derive(Args, Debug)]
@@ -197,6 +199,18 @@ pub struct DetectArgs {
     /// third-party dependency cannot be silently shipped to the library.
     #[arg(long)]
     pub include_vendored: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveArgs {
+    /// Skill to remove, by name. Repeatable. Mutually exclusive with --all.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    pub skills: Vec<String>,
+
+    /// Remove every removable skill found in the project (installed via
+    /// skillctl, created locally, or orphaned .skills.toml entries).
+    #[arg(long, conflicts_with = "skills")]
+    pub all: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

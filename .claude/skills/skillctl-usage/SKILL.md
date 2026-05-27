@@ -40,6 +40,9 @@ Per-command top-level shape:
 
 // detect
 {"command":"detect","target":"…|null","results":[{"name":"…","status":"added|skipped","library_path":"…","local_path":"…","source_sha":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"added":N,"skipped":N}}
+
+// remove
+{"command":"remove","results":[{"name":"…","status":"removed|failed","path":"…","removed_folder":true|false,"removed_entry":true|false,"reason":"…"}],"summary":{"removed":N,"failed":N}}
 ```
 
 Stable rules:
@@ -190,6 +193,26 @@ skillctl detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-pat
 
 `skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.
 
+### `skillctl remove` — remove skills from the current project
+
+```sh
+skillctl remove --skill <name> [--skill <name> …]
+skillctl remove --all
+```
+
+| Flag | Purpose | Required in non-interactive |
+|---|---|---|
+| `--skill <name>` | Remove a specific skill by name (repeatable). Mutually exclusive with `--all`. Errors if the name is unknown or ambiguous (two skills share it). | Yes, unless `--all` |
+| `--all` | Remove every removable skill found in the project. Mutually exclusive with `--skill`. | Yes, unless `--skill` |
+
+`skillctl remove` is **project-only** — it never touches the library or git. It walks the current directory for skill folders (respecting `.gitignore`, skipping `node_modules`/`target`) and cross-references `.skills.toml`, presenting three kinds of removable skill:
+
+- **installed via skillctl** — folder present *and* tracked in `.skills.toml`. Removing it deletes the folder and drops the entry.
+- **created locally, not tracked** — folder present but absent from `.skills.toml`. Removing it deletes the folder only.
+- **orphan** — a `.skills.toml` entry whose folder is already gone. Removing it drops the stale entry only (nothing to delete on disk).
+
+In each `results[]` item, `removed_folder` and `removed_entry` report which of the two actions actually happened. `.skills.toml` is only rewritten when at least one tracked entry is dropped. In an interactive TTY, a confirmation prompt is shown before anything is deleted; in non-interactive/`--json` mode the explicit `--skill`/`--all` flags are the authorisation. A symlinked destination is never followed — it is treated as "no folder on disk" so removal can only ever drop its manifest entry, never delete through the link.
+
 ## Skill identity
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.
@@ -212,7 +235,7 @@ Errors always go to stderr regardless of mode.
 
 ## Interactive prompt (multi-select with live filter)
 
-When a multi-select prompt opens (in `add`, `push`, `pull`, `detect` without flags or `--all` and a TTY), the prompt has a live filter:
+When a multi-select prompt opens (in `add`, `push`, `pull`, `detect`, `remove` without flags or `--all` and a TTY), the prompt has a live filter:
 
 - **Type any character** — appends to the filter; the list filters in real time on the skill name (substring, case-insensitive).
 - **Backspace** — edits the filter.
@@ -310,6 +333,18 @@ skillctl detect --all --target skills
 
 ```sh
 skillctl push --skill review --skill security-review --message "polish: tighter reviewer prompts"
+```
+
+### Remove specific skills from a project
+
+```sh
+skillctl remove --skill claude-api --skill review
+```
+
+### Remove every skill from a project (folders + manifest entries)
+
+```sh
+skillctl remove --all
 ```
 
 ## Failure modes worth checking before invoking
