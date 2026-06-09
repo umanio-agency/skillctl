@@ -63,7 +63,7 @@ pub struct LibraryAddArgs {
     /// Short name used to reference this library (e.g. with future --from/--to).
     pub name: String,
 
-    /// Repository URL (GitHub HTTPS or SSH).
+    /// Repository URL — GitHub, GitLab, or self-hosted; HTTPS or SSH.
     pub url: String,
 
     /// Access level: `read` (default — consume only), `write`, or `pr`.
@@ -91,7 +91,8 @@ pub enum AccessArg {
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// GitHub URL of the skills library (e.g. https://github.com/owner/repo).
+    /// Repository URL of the skills library — GitHub, GitLab, or self-hosted;
+    /// HTTPS or SSH (e.g. https://github.com/owner/repo).
     pub url: String,
 }
 

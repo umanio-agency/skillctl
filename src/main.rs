@@ -5,6 +5,7 @@ mod context;
 mod error;
 mod fs_util;
 mod git;
+mod host;
 mod lock;
 mod path_safety;
 mod project_config;

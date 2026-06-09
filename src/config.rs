@@ -212,7 +212,8 @@ pub fn cache_dir() -> Result<PathBuf> {
 }
 
 pub fn library_cache_path(url: &str) -> Result<PathBuf> {
-    Ok(cache_dir()?.join(slug_for_url(url)?))
+    let remote = crate::host::parse_remote_url(url)?;
+    Ok(cache_dir()?.join(crate::host::cache_slug(&remote)))
 }
 
 pub fn load() -> Result<Config> {
@@ -314,39 +315,6 @@ pub fn sanitize_url_for_display(url: &str) -> String {
     url.to_string()
 }
 
-/// Derive a stable cache folder name from a GitHub URL: `owner-repo`.
-///
-/// Accepts only HTTPS (`https://github.com/owner/repo`) or SSH
-/// (`git@github.com:owner/repo`) forms. Plain `http://` is rejected so a
-/// network attacker on the operator's link cannot downgrade the clone to
-/// cleartext — GitHub itself redirects `http://` to `https://`, but a MITM
-/// could intercept the initial connection and serve modified content.
-fn slug_for_url(url: &str) -> Result<String> {
-    let trimmed = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let tail = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
-        rest
-    } else if trimmed.starts_with("http://") {
-        return Err(anyhow!(
-            "refusing to use cleartext HTTP URL: {url} — use the HTTPS form (`https://github.com/owner/repo`) instead"
-        ));
-    } else {
-        return Err(anyhow!(
-            "unsupported URL: {url} — expected a GitHub HTTPS or SSH URL"
-        ));
-    };
-    let (owner, repo) = tail
-        .split_once('/')
-        .ok_or_else(|| anyhow!("malformed GitHub URL: {url} — expected the form owner/repo"))?;
-    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
-        return Err(anyhow!(
-            "malformed GitHub URL: {url} — expected the form owner/repo"
-        ));
-    }
-    Ok(format!("{owner}-{repo}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,51 +363,6 @@ mod tests {
             sanitize_url_for_display("https://github.com/foo/bar@v1"),
             "https://github.com/foo/bar@v1"
         );
-    }
-
-    #[test]
-    fn slug_https() {
-        assert_eq!(
-            slug_for_url("https://github.com/foo/bar").unwrap(),
-            "foo-bar"
-        );
-    }
-
-    #[test]
-    fn slug_https_dot_git() {
-        assert_eq!(
-            slug_for_url("https://github.com/foo/bar.git").unwrap(),
-            "foo-bar"
-        );
-    }
-
-    #[test]
-    fn slug_ssh() {
-        assert_eq!(
-            slug_for_url("git@github.com:foo/bar.git").unwrap(),
-            "foo-bar"
-        );
-    }
-
-    #[test]
-    fn slug_rejects_non_github() {
-        assert!(slug_for_url("https://gitlab.com/foo/bar").is_err());
-    }
-
-    #[test]
-    fn slug_rejects_cleartext_http() {
-        let err = slug_for_url("http://github.com/foo/bar")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("cleartext") || err.contains("HTTPS"),
-            "expected HTTPS-required error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn slug_rejects_malformed() {
-        assert!(slug_for_url("https://github.com/foo").is_err());
     }
 
     fn lib(name: &str, default: bool) -> Library {
