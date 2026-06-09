@@ -49,8 +49,8 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl add")?;
 
     let cfg = config::load()?;
-    let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
+    let library = cfg.default_library().cloned().ok_or_else(|| {
+        AppError::Config("no library configured — run `skillctl init <github-url>` first".into())
     })?;
 
     let library_root =
@@ -198,6 +198,8 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                 source_sha: source_sha.clone(),
                 destination: destination_rel,
                 installed_at: installed_at.clone(),
+                library: Some(library.name.clone()),
+                library_url: Some(library.url.clone()),
             })
         })();
         match outcome {

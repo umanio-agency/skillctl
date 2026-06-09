@@ -30,6 +30,7 @@ fn main() -> std::process::ExitCode {
         Command::Pull(args) => commands::pull::run(args, &ctx),
         Command::Detect(args) => commands::detect::run(args, &ctx),
         Command::Remove(args) => commands::remove::run(args, &ctx),
+        Command::Library(sub) => commands::library::run(sub, &ctx),
     };
     match result {
         Ok(()) => ExitCode::Success.into(),

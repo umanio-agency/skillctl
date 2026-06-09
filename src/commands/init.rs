@@ -1,54 +1,48 @@
-use std::fs;
-
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 use crate::cli::InitArgs;
-use crate::config::{self, Config, Library};
+use crate::commands::library::clone_into_cache;
+use crate::config::{self, Access, Library, PRIMARY_LIBRARY_NAME};
 use crate::context::Context;
 use crate::error::AppError;
-use crate::git;
 use crate::ui;
 
 pub fn run(args: InitArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl init")?;
 
-    git::ensure_available().map_err(|e| AppError::Git(e.to_string()))?;
-
-    // `args.url` may carry an embedded `user:token@` for the one-time clone;
-    // we use it as-is to call `git clone`, but never persist or echo it.
-    // `display_url` is the sanitised form that lands in `config.toml`,
-    // logs, JSON output, and any later error chain referencing `library.url`.
-    let clone_url = args.url;
-    let display_url = config::sanitize_url_for_display(&clone_url);
-    let dest =
-        config::library_cache_path(&display_url).map_err(|e| AppError::Config(e.to_string()))?;
-
+    // Clone first (validates the URL + credentials), then record/re-point the
+    // primary library. `clone_into_cache` returns the sanitised display URL —
+    // the raw `args.url` (which may carry one-time `user:token@`) is never
+    // persisted.
+    let (display_url, dest) = clone_into_cache(ctx, &args.url)?;
     let dest_display = crate::fs_util::display_path(&dest);
-    if dest.exists() {
-        fs::remove_dir_all(&dest)
-            .with_context(|| format!("removing existing cache at {dest_display}"))?;
-    }
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "creating cache dir at {}",
-                crate::fs_util::display_path(parent)
-            )
-        })?;
-    }
 
-    ui::log_info(
-        ctx,
-        format!("cloning {display_url} into {dest_display} ..."),
-    )?;
-    git::clone(&clone_url, &dest).map_err(|e| AppError::Git(e.to_string()))?;
-
-    let config = Config {
-        library: Some(Library {
-            url: display_url.clone(),
-        }),
-    };
-    config::save(&config).map_err(|e| AppError::Config(e.to_string()))?;
+    let mut cfg = config::load()?;
+    if let Some(personal) = cfg
+        .libraries
+        .iter_mut()
+        .find(|l| l.name == PRIMARY_LIBRARY_NAME)
+    {
+        // Re-point the `personal` library specifically; keep its access and
+        // default flag. (Re-pointing "whatever is default" would silently
+        // rewrite a user-chosen team library's URL — `init` manages the
+        // operator's own primary library, not whichever happens to be default.)
+        personal.url = display_url.clone();
+    } else {
+        // No `personal` library yet: create it with write access, marked
+        // default (a fresh primary is the default).
+        cfg.add_library(
+            Library {
+                name: PRIMARY_LIBRARY_NAME.to_string(),
+                url: display_url.clone(),
+                access: Access::Write,
+                default: false,
+            },
+            true,
+        )
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    }
+    config::save(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
 
     ui::log_success(ctx, format!("library configured: {display_url}"))?;
 

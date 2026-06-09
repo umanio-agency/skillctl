@@ -31,6 +31,17 @@ pub struct InstalledSkill {
     pub source_sha: String,
     pub destination: PathBuf,
     pub installed_at: String,
+    /// Provenance — the name of the library this skill was installed from.
+    /// Optional for back-compat with manifests written before multi-library
+    /// support; absence means it came from the (then sole) default library.
+    /// The name is a local alias; `library_url` is the durable key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
+    /// Provenance — the URL of the library this skill was installed from.
+    /// Durable across `library` renames/removals; the routing key for which
+    /// library `push`/`pull` act against once multi-library routing lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_url: Option<String>,
 }
 
 impl InstalledSkill {
@@ -70,6 +81,17 @@ impl InstalledSkill {
                 self.name
             ))
         })?;
+
+        // Provenance fields travel via PR-merged `.skills.toml` and are echoed
+        // in logs/JSON; reject control characters (CRLF trailer forgery, ANSI
+        // hijack) on both. `validate_identifier` rejects all control chars
+        // while still allowing the URL punctuation (`/ : . @ ?`) a URL needs.
+        if let Some(library) = &self.library {
+            validate_identifier("library in .skills.toml", library)?;
+        }
+        if let Some(library_url) = &self.library_url {
+            validate_identifier("library_url in .skills.toml", library_url)?;
+        }
         Ok(())
     }
 }
@@ -173,6 +195,8 @@ mod tests {
             source_sha: VALID_SHA.to_string(),
             destination: PathBuf::from(destination),
             installed_at: "2026-05-20T00:00:00Z".to_string(),
+            library: None,
+            library_url: None,
         }
     }
 
@@ -426,5 +450,55 @@ installed_at = "2026-05-20T00:00:00Z"
         let cfg = load(work.path()).unwrap();
         assert_eq!(cfg.installed.len(), 1);
         assert_eq!(cfg.installed[0].name, "foo");
+        // Pre-multi-library manifests have no provenance fields.
+        assert!(cfg.installed[0].library.is_none());
+        assert!(cfg.installed[0].library_url.is_none());
+    }
+
+    #[test]
+    fn load_accepts_provenance_fields() {
+        let work = TempDir::new().unwrap();
+        let raw = r#"
+[[installed]]
+name = "foo"
+source_path = "skills/foo"
+source_sha = "0123456789abcdef0123456789abcdef01234567"
+destination = ".claude/skills/foo"
+installed_at = "2026-05-20T00:00:00Z"
+library = "personal"
+library_url = "https://github.com/o/r"
+"#;
+        fs::write(work.path().join(".skills.toml"), raw).unwrap();
+        let cfg = load(work.path()).unwrap();
+        assert_eq!(cfg.installed[0].library.as_deref(), Some("personal"));
+        assert_eq!(
+            cfg.installed[0].library_url.as_deref(),
+            Some("https://github.com/o/r")
+        );
+    }
+
+    #[test]
+    fn provenance_roundtrips_through_save() {
+        let work = TempDir::new().unwrap();
+        let cfg = ProjectConfig {
+            installed: vec![InstalledSkill {
+                library: Some("personal".to_string()),
+                library_url: Some("https://github.com/o/r".to_string()),
+                ..make_skill("foo", "skills/foo", ".claude/skills/foo")
+            }],
+        };
+        save(work.path(), &cfg).unwrap();
+        let reloaded = load(work.path()).unwrap();
+        assert_eq!(reloaded.installed[0].library.as_deref(), Some("personal"));
+    }
+
+    #[test]
+    fn validate_rejects_control_char_in_library() {
+        let s = InstalledSkill {
+            library: Some("per\nsonal".to_string()),
+            ..make_skill("foo", "skills/foo", ".claude/skills/foo")
+        };
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("library"), "got: {err}");
     }
 }

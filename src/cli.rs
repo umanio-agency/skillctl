@@ -41,6 +41,52 @@ pub enum Command {
     Detect(DetectArgs),
     /// Remove skills from the current project (folder + any .skills.toml entry).
     Remove(RemoveArgs),
+    /// Manage configured skill libraries (read sources + write targets).
+    #[command(subcommand)]
+    Library(LibraryCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LibraryCommand {
+    /// Register a new library by name and URL (clones it into the cache).
+    Add(LibraryAddArgs),
+    /// List the configured libraries.
+    List,
+    /// Remove a configured library (drops the config entry; leaves the cache).
+    Remove(LibraryRefArgs),
+    /// Mark a configured library as the default.
+    SetDefault(LibraryRefArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct LibraryAddArgs {
+    /// Short name used to reference this library (e.g. with future --from/--to).
+    pub name: String,
+
+    /// Repository URL (GitHub HTTPS or SSH).
+    pub url: String,
+
+    /// Access level: `read` (default — consume only), `write`, or `pr`.
+    #[arg(long, value_enum, default_value = "read")]
+    pub access: AccessArg,
+
+    /// Mark this library as the default. The first library added is always
+    /// the default regardless of this flag.
+    #[arg(long)]
+    pub default: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct LibraryRefArgs {
+    /// Name of the configured library.
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AccessArg {
+    Read,
+    Write,
+    Pr,
 }
 
 #[derive(Args, Debug)]

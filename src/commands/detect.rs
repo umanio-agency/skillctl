@@ -32,8 +32,8 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl detect")?;
 
     let cfg = config::load()?;
-    let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
+    let library = cfg.default_library().cloned().ok_or_else(|| {
+        AppError::Config("no library configured — run `skillctl init <github-url>` first".into())
     })?;
 
     let library_root =
@@ -196,6 +196,8 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
             source_sha: new_sha.clone(),
             destination: local_destination.clone(),
             installed_at: installed_at.clone(),
+            library: Some(library.name.clone()),
+            library_url: Some(library.url.clone()),
         });
         ui::log_success(ctx, format!("{} → {}", skill.name, lib_relative.display()))?;
         results.push(json!({

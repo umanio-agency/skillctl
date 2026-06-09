@@ -76,8 +76,8 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     }
 
     let cfg = config::load()?;
-    let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
+    let library = cfg.default_library().cloned().ok_or_else(|| {
+        AppError::Config("no library configured — run `skillctl init <github-url>` first".into())
     })?;
 
     let library_root =
