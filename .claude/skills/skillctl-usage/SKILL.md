@@ -94,8 +94,12 @@ skillctl add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
 | `--all-tags` | Switch tag matching from union to intersection (skill must carry every requested tag). Requires `--tag`. | No |
 | `--dest <path>` | Project-relative destination folder (e.g. `.claude/skills`). The folder is created if missing. | **Yes** |
 | `--on-conflict <overwrite\|skip\|abort>` | Strategy when a destination skill folder already exists. | Yes if any conflict is encountered |
+| `--no-audit` | Skip the content security audit of skills before installing. | No |
+| `--fail-on <info\|warning\|critical>` | Refuse the **whole batch** (install nothing, exit 5) if any selected skill's content audit reaches this severity. Without it the audit is warn-only. | No |
 
-Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, and an RFC3339 timestamp.
+Before anything is copied, `add` runs a content security audit (see `skillctl audit`) on each selected skill. By default it is **warn-only** (findings are logged, the install proceeds); under `--json` each installed skill's result carries an `"audit_verdict"` field (`safe`/`caution`/`warning`/`dangerous`) so a non-interactive caller still sees the signal. Pass `--fail-on <severity>` to block, or `--no-audit` to skip the scan entirely.
+
+Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, an RFC3339 timestamp, and the provenance (`library` name + `library_url`) it was installed from.
 
 Tags are read from the `SKILL.md` frontmatter. Both inline and block forms work:
 
@@ -213,6 +217,23 @@ skillctl remove --all
 
 In each `results[]` item, `removed_folder` and `removed_entry` report which of the two actions actually happened. `.skills.toml` is only rewritten when at least one tracked entry is dropped. In an interactive TTY, a confirmation prompt is shown before anything is deleted; in non-interactive/`--json` mode the explicit `--skill`/`--all` flags are the authorisation. A symlinked destination is never followed — it is treated as "no folder on disk" so removal can only ever drop its manifest entry, never delete through the link.
 
+### `skillctl audit` — scan skill content for dangerous patterns
+
+```sh
+skillctl audit                       # scan every skill in the project
+skillctl audit --skill <name>        # scan only this skill (repeatable)
+skillctl audit --fail-on warning     # exit 5 if any finding reaches the threshold
+skillctl --json audit
+```
+
+| Flag | Purpose | Required in non-interactive |
+|---|---|---|
+| `--skill <name>` | Audit only this skill by name (repeatable). Mutually exclusive with `--all`. Errors if the name is unknown. | No |
+| `--all` | Audit every skill found in the project (the default behaviour). Mutually exclusive with `--skill`. | No |
+| `--fail-on <info\|warning\|critical>` | Exit with code 5 if any finding reaches this severity. Without it, `audit` always exits 0. | No |
+
+`audit` is **read-only** — it scans the `SKILL.md` and any bundled files of each skill discovered in the current project and reports a per-skill verdict (`safe` / `caution` / `warning` / `dangerous`). Categories: `credentials` (embedded keys/tokens — critical), `obfuscation` (long base64 / hex-escape blobs — warning), `shell` (`rm -rf`, `curl|sh` — warning/info), `dynamic-code` (`eval(` — info), and `prompt-injection` (instruction-override / conceal-from-user / exfiltration phrasings — warning). It is a heuristic advisory aid, not a guarantee. The same scan gates `skillctl add` (see above). The `--json` shape is `{ "command": "audit", "skills": [ { "name", "verdict", "findings": [ { "severity", "category", "label", "file", "line", "snippet" } ] } ], "summary": { "scanned", "worst_severity" } }`.
+
 ## Skill identity
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.
@@ -224,6 +245,7 @@ A "skill" is any folder containing a file literally named `SKILL.md`. The skill'
 - `2` — **configuration error**: no library configured, library cache missing, malformed URL, missing required flag in non-interactive mode (e.g. `--dest`, `--skill`, `--target`), invalid skill name, malformed `.skills.toml`.
 - `3` — **conflict**: a destination already exists with no `--on-conflict` policy in non-interactive mode, a fork target collides in the library, or a local fork target collides.
 - `4` — **git error**: `git clone`/`fetch`/`commit`/`push`/`hash-object`/`ls-tree` failed (auth, network, missing user identity, etc.).
+- `5` — **content-audit threshold exceeded**: `add --fail-on <severity>` refused to install (nothing was installed), or `audit --fail-on <severity>` found a finding at or above the threshold.
 
 Agents should branch on exit code first, then optionally inspect stderr for context. Stdout in `--json` mode is always either a single JSON object (success or partial success) or empty (early failure before output is built).
 

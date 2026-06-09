@@ -1,4 +1,5 @@
 pub mod add;
+pub mod audit;
 pub mod detect;
 pub mod diff;
 pub mod init;

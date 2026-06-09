@@ -1,3 +1,4 @@
+mod audit;
 mod cli;
 mod commands;
 mod config;
@@ -32,6 +33,7 @@ fn main() -> std::process::ExitCode {
         Command::Detect(args) => commands::detect::run(args, &ctx),
         Command::Remove(args) => commands::remove::run(args, &ctx),
         Command::Library(sub) => commands::library::run(sub, &ctx),
+        Command::Audit(args) => commands::audit::run(args, &ctx),
     };
     match result {
         Ok(()) => ExitCode::Success.into(),

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,6 +10,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::audit::{self, Severity};
 use crate::cli::{AddArgs, OnConflict};
 use crate::commands::shared::{matches_tags, short_hint};
 use crate::config;
@@ -91,6 +93,18 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
         emit_json(ctx, None, &[]);
         return Ok(());
     }
+
+    // Content audit of the (untrusted) skill content before anything lands in
+    // the project. Warn-only by default; `--fail-on <severity>` refuses the
+    // whole batch (nothing is installed) if any selected skill reaches the
+    // threshold; `--no-audit` skips entirely. The returned map (skill name →
+    // verdict) is surfaced per-skill in the JSON output so non-interactive
+    // consumers get the audit signal even in warn-only mode.
+    let audit_verdicts = if args.no_audit {
+        HashMap::new()
+    } else {
+        audit_gate(ctx, &selected, args.fail_on.map(Into::into))?
+    };
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     // Serialise concurrent skillctl runs on this project's .skills.toml.
@@ -213,6 +227,7 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                     "status": "installed",
                     "path": dest_display,
                     "source_sha": source_sha_for_json,
+                    "audit_verdict": audit_verdicts.get(skill.name.as_str()).copied(),
                 }));
             }
             Err(e) => {
@@ -242,6 +257,52 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     }
     emit_json(ctx, Some(&dest_root), &results);
     Ok(())
+}
+
+/// Scan each selected skill's content. Findings are logged as warnings
+/// (no-op under `--json`); when `fail_on` is set, any skill reaching that
+/// severity blocks the entire batch (nothing is installed) so untrusted
+/// content never lands in the project on a failed bar. Returns a map of skill
+/// name → verdict so the caller can surface it in the JSON output (the signal
+/// non-interactive consumers would otherwise miss in warn-only mode).
+fn audit_gate(
+    ctx: &Context,
+    selected: &[Skill],
+    fail_on: Option<Severity>,
+) -> Result<HashMap<String, &'static str>> {
+    let mut blocked: Vec<String> = Vec::new();
+    let mut verdicts: HashMap<String, &'static str> = HashMap::new();
+    for s in selected {
+        let report = audit::scan_skill(&s.path);
+        verdicts.insert(s.name.clone(), report.verdict().as_str());
+        for f in &report.findings {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "audit[{}] {}: {} ({}:{})",
+                    s.name,
+                    f.severity.as_str(),
+                    f.label,
+                    f.file,
+                    f.line
+                ),
+            )?;
+        }
+        let over_threshold = fail_on.is_some_and(|t| report.max_severity().is_some_and(|m| m >= t));
+        if over_threshold {
+            blocked.push(format!("{} ({})", s.name, report.verdict().as_str()));
+        }
+    }
+    if !blocked.is_empty() {
+        // `blocked` is only populated when `fail_on` is `Some`.
+        let threshold = fail_on.map(|t| t.as_str()).unwrap_or("warning");
+        return Err(AppError::Audit(format!(
+            "refusing to install (content audit ≥ `{threshold}`): {}. Re-run with --no-audit to override.",
+            blocked.join(", ")
+        ))
+        .into());
+    }
+    Ok(verdicts)
 }
 
 fn emit_json(ctx: &Context, destination: Option<&PathBuf>, results: &[Value]) {

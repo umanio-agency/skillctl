@@ -44,6 +44,8 @@ pub enum Command {
     /// Manage configured skill libraries (read sources + write targets).
     #[command(subcommand)]
     Library(LibraryCommand),
+    /// Scan skills' content for dangerous patterns and report a verdict.
+    Audit(AuditArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -139,6 +141,15 @@ pub struct AddArgs {
     /// Required in non-interactive mode if any conflict is encountered.
     #[arg(long, value_enum, value_name = "POLICY")]
     pub on_conflict: Option<OnConflict>,
+
+    /// Skip the content security audit of skills before installing them.
+    #[arg(long)]
+    pub no_audit: bool,
+
+    /// Refuse to install any skill whose content audit reaches this severity
+    /// (`info` | `warning` | `critical`). Without it, the audit is warn-only.
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    pub fail_on: Option<SeverityArg>,
 }
 
 #[derive(Args, Debug)]
@@ -258,6 +269,29 @@ pub struct RemoveArgs {
     /// skillctl, created locally, or orphaned .skills.toml entries).
     #[arg(long, conflicts_with = "skills")]
     pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AuditArgs {
+    /// Audit only this skill (by name). Repeatable. Mutually exclusive with --all.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    pub skills: Vec<String>,
+
+    /// Audit every skill found in the current project.
+    #[arg(long, conflicts_with = "skills")]
+    pub all: bool,
+
+    /// Exit non-zero (code 5) if any finding reaches this severity
+    /// (`info` | `warning` | `critical`).
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    pub fail_on: Option<SeverityArg>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum SeverityArg {
+    Info,
+    Warning,
+    Critical,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
