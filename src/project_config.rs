@@ -91,6 +91,17 @@ impl InstalledSkill {
         }
         if let Some(library_url) = &self.library_url {
             validate_identifier("library_url in .skills.toml", library_url)?;
+            // `library_url` is the durable routing key for `push`/`pull`. It
+            // must be a parseable repo URL: an unparseable value would be
+            // ignored by the URL comparison in `Library::matches_provenance`
+            // and could otherwise let a foreign skill fall back to a matching
+            // `library` name alias. Reject it at the boundary (fail closed).
+            crate::host::parse_remote_url(library_url).map_err(|e| {
+                AppError::Config(format!(
+                    "invalid library_url for skill `{}` in .skills.toml: {e}",
+                    self.name
+                ))
+            })?;
         }
         Ok(())
     }
@@ -490,6 +501,29 @@ library_url = "https://github.com/o/r"
         save(work.path(), &cfg).unwrap();
         let reloaded = load(work.path()).unwrap();
         assert_eq!(reloaded.installed[0].library.as_deref(), Some("personal"));
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_library_url() {
+        // Security: an unparseable `library_url` is the routing-bypass vector,
+        // so it must be rejected at load time, not silently ignored.
+        let s = InstalledSkill {
+            library: Some("personal".to_string()),
+            library_url: Some("not-a-url".to_string()),
+            ..make_skill("foo", "skills/foo", ".claude/skills/foo")
+        };
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("library_url"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_scp_library_url() {
+        let s = InstalledSkill {
+            library: Some("personal".to_string()),
+            library_url: Some("git@github.com:o/r.git".to_string()),
+            ..make_skill("foo", "skills/foo", ".claude/skills/foo")
+        };
+        assert!(s.validate().is_ok());
     }
 
     #[test]

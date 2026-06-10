@@ -67,6 +67,14 @@ fn add(args: LibraryAddArgs, ctx: &Context) -> Result<()> {
     // Validate the name and reject a duplicate before any network work, so a
     // typo fails fast instead of after a clone.
     validate_identifier("library name", &args.name)?;
+    // `all` is reserved — `--from all` means "span every library", so a
+    // library literally named `all` could never be addressed by name.
+    if args.name == "all" {
+        return Err(AppError::Conflict(
+            "`all` is a reserved library name (used by `--from all`); choose another name".into(),
+        )
+        .into());
+    }
     let mut cfg = config::load()?;
     if cfg.by_name(&args.name).is_some() {
         return Err(

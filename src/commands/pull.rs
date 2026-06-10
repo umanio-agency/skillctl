@@ -115,6 +115,24 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
 
     let mut candidates = Vec::new();
     for (index, installed) in project_cfg.installed.iter().enumerate() {
+        // Provenance routing: `pull` refreshes from the default library only.
+        // Skills installed from another configured library are skipped here —
+        // classifying them against the wrong cache would mis-resolve their
+        // source paths. Cross-library pull lands in a later release.
+        if !library.matches_provenance(
+            installed.library.as_deref(),
+            installed.library_url.as_deref(),
+        ) {
+            let origin = installed.library.as_deref().unwrap_or("another library");
+            ui::log_info(
+                ctx,
+                format!(
+                    "{} — installed from `{origin}`; skipping (pull from non-default libraries arrives in a later release)",
+                    installed.name
+                ),
+            )?;
+            continue;
+        }
         let status = classify(installed, &cwd, &library_root)?;
         let tags = skill::read_tags(&cwd.join(&installed.destination).join("SKILL.md"))
             .unwrap_or_default();

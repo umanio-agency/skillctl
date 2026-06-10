@@ -61,6 +61,41 @@ pub struct Library {
     pub default: bool,
 }
 
+impl Library {
+    /// Whether an installed skill's recorded provenance points at this library.
+    ///
+    /// `push`/`pull` act only on skills that belong to the library they target
+    /// (the default in this build), skipping skills installed from another
+    /// library until cross-library write-back lands. Matching is by normalized
+    /// URL (the durable key — survives a `library` rename), then by name; a
+    /// skill carrying no provenance at all is treated as belonging to the
+    /// default library (pre-multi-library manifests).
+    pub fn matches_provenance(&self, library: Option<&str>, library_url: Option<&str>) -> bool {
+        if library.is_none() && library_url.is_none() {
+            return self.default;
+        }
+        // `library_url` is the authoritative routing key. When it is present we
+        // decide solely on it and **fail closed**: if either side fails to
+        // parse we cannot confidently match, so treat the skill as foreign
+        // (return false) rather than falling back to the rename-able `library`
+        // name. Otherwise an attacker-supplied `.skills.toml` could set an
+        // unparseable `library_url` plus the default library's name to slip a
+        // foreign skill past the skip and have push/pull act on the wrong cache.
+        if let Some(url) = library_url {
+            return match (
+                crate::host::parse_remote_url(url),
+                crate::host::parse_remote_url(&self.url),
+            ) {
+                (Ok(want), Ok(have)) => want.normalized == have.normalized,
+                _ => false,
+            };
+        }
+        // No URL recorded (legacy / hand-written manifest): the name alias is
+        // the only signal available.
+        library == Some(self.name.as_str())
+    }
+}
+
 impl Config {
     /// The library that read/write flows act on by default. Falls back to the
     /// first entry if (somehow) none is flagged default — `validate` rejects
@@ -74,6 +109,25 @@ impl Config {
 
     pub fn by_name(&self, name: &str) -> Option<&Library> {
         self.libraries.iter().find(|l| l.name == name)
+    }
+
+    /// Resolve which library a read command (`add`/`list`) consumes from.
+    /// `None` → the default library; `Some(name)` → the named library. The
+    /// `--from all` span is not a single library, so the caller handles it
+    /// before reaching here.
+    pub fn resolve_read(&self, from: Option<&str>) -> Result<&Library, AppError> {
+        match from {
+            None => self.default_library().ok_or_else(|| {
+                AppError::Config(
+                    "no library configured — run `skillctl init <url>` first".into(),
+                )
+            }),
+            Some(name) => self.by_name(name).ok_or_else(|| {
+                AppError::Config(format!(
+                    "no library named `{name}` — run `skillctl library list` to see configured libraries"
+                ))
+            }),
+        }
     }
 
     /// Register a library, enforcing name uniqueness. The new library becomes
@@ -582,6 +636,88 @@ default = true
         assert!(!cfg.by_name("a").unwrap().default);
         assert!(cfg.by_name("b").unwrap().default);
         assert!(cfg.set_default("ghost").is_err());
+    }
+
+    #[test]
+    fn resolve_read_defaults_to_default_library() {
+        let mut cfg = Config::default();
+        cfg.add_library(lib("a", true), true).unwrap();
+        cfg.add_library(lib("b", false), false).unwrap();
+        assert_eq!(cfg.resolve_read(None).unwrap().name, "a");
+    }
+
+    #[test]
+    fn resolve_read_named_library() {
+        let mut cfg = Config::default();
+        cfg.add_library(lib("a", true), true).unwrap();
+        cfg.add_library(lib("b", false), false).unwrap();
+        assert_eq!(cfg.resolve_read(Some("b")).unwrap().name, "b");
+    }
+
+    #[test]
+    fn resolve_read_unknown_name_errors() {
+        let mut cfg = Config::default();
+        cfg.add_library(lib("a", true), true).unwrap();
+        assert!(cfg.resolve_read(Some("ghost")).is_err());
+    }
+
+    #[test]
+    fn resolve_read_no_library_errors() {
+        let cfg = Config::default();
+        assert!(cfg.resolve_read(None).is_err());
+    }
+
+    #[test]
+    fn matches_provenance_no_provenance_is_default_library() {
+        let mut cfg = Config::default();
+        cfg.add_library(lib("personal", true), true).unwrap();
+        cfg.add_library(lib("team", false), false).unwrap();
+        let personal = cfg.by_name("personal").unwrap();
+        let team = cfg.by_name("team").unwrap();
+        // A pre-multi-library skill (no provenance) belongs to the default.
+        assert!(personal.matches_provenance(None, None));
+        assert!(!team.matches_provenance(None, None));
+    }
+
+    #[test]
+    fn matches_provenance_by_url_across_spellings() {
+        let team = Library {
+            name: "team".into(),
+            url: "https://github.com/o/team".into(),
+            access: Access::Read,
+            default: false,
+        };
+        // scp spelling of the same repo still matches by normalized URL.
+        assert!(team.matches_provenance(Some("renamed"), Some("git@github.com:o/team.git")));
+        // A different repo does not match, even if the name happens to.
+        assert!(!team.matches_provenance(Some("team"), Some("https://github.com/o/other")));
+    }
+
+    #[test]
+    fn matches_provenance_fails_closed_on_unparseable_url() {
+        // Security: a present-but-unparseable `library_url` must NOT fall back
+        // to the name alias — otherwise a foreign skill claiming the default
+        // library's name would route against the wrong cache.
+        let default = Library {
+            name: "personal".into(),
+            url: "https://github.com/o/personal".into(),
+            access: Access::Write,
+            default: true,
+        };
+        assert!(!default.matches_provenance(Some("personal"), Some("not-a-url")));
+        assert!(!default.matches_provenance(Some("personal"), Some("github.com/o/personal")));
+    }
+
+    #[test]
+    fn matches_provenance_falls_back_to_name_without_url() {
+        let team = Library {
+            name: "team".into(),
+            url: "https://github.com/o/team".into(),
+            access: Access::Read,
+            default: false,
+        };
+        assert!(team.matches_provenance(Some("team"), None));
+        assert!(!team.matches_provenance(Some("personal"), None));
     }
 
     #[test]

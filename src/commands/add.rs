@@ -51,17 +51,33 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl add")?;
 
     let cfg = config::load()?;
-    let library = cfg.default_library().cloned().ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init <github-url>` first".into())
-    })?;
+    if args.from.as_deref() == Some("all") {
+        return Err(AppError::Config(
+            "`--from all` is supported on `skillctl list`; for `add`, install from one library with `--from <name>`".into(),
+        )
+        .into());
+    }
+    let library = cfg.resolve_read(args.from.as_deref())?.clone();
+
+    // Installing from a non-default library means third-party (untrusted)
+    // content, for which the content audit is mandatory — `--no-audit` is
+    // refused so the audit can never be silenced for content you don't own.
+    if args.no_audit && !library.default {
+        return Err(AppError::Config(format!(
+            "refusing --no-audit when installing from the non-default library `{}`: third-party content is always audited; drop --no-audit",
+            library.name
+        ))
+        .into());
+    }
 
     let library_root =
         config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skillctl init{}` again",
+            "cache for library `{}` not found at {} — re-clone it with `skillctl library add {} <url>` (or `skillctl init <url>` for the default library)",
+            library.name,
             fs_util::display_path(&library_root),
-            library.url
+            library.name
         ))
         .into());
     }

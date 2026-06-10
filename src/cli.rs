@@ -100,6 +100,11 @@ pub struct InitArgs {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// Library to list from, by name (defaults to the default library). Pass
+    /// `all` to list every configured library, with the source shown per skill.
+    #[arg(long, value_name = "NAME")]
+    pub from: Option<String>,
+
     /// Show only skills carrying this tag. Repeatable; default semantics is
     /// union (any of the given tags).
     #[arg(long = "tag", value_name = "TAG")]
@@ -113,6 +118,12 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
+    /// Library to install from, by name (defaults to the default library).
+    /// Installing from a non-default (third-party) library forces the content
+    /// audit on — `--no-audit` is refused in that case.
+    #[arg(long, value_name = "NAME")]
+    pub from: Option<String>,
+
     /// Skill name to install. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
