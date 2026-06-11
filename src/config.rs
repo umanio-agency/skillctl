@@ -230,6 +230,26 @@ impl Config {
                 }
             }
         }
+        // Reject two libraries that resolve to the same repository (same
+        // normalized URL). They would share one cache directory AND one
+        // provenance match, so `resolve_provenance` would route a skill by
+        // config order rather than intent — letting a `read`/`pr` library that
+        // shares a repo with a `write` sibling be written to, bypassing the
+        // access gate. (Distinct repos can't collide: the cache slug hashes the
+        // normalized URL.) Only parseable URLs are compared; an unparseable URL
+        // never matches provenance (fail-closed), so it can't enable this.
+        let mut seen: Vec<(String, &str)> = Vec::with_capacity(self.libraries.len());
+        for lib in &self.libraries {
+            if let Ok(remote) = crate::host::parse_remote_url(&lib.url) {
+                if let Some((_, other)) = seen.iter().find(|(n, _)| *n == remote.normalized) {
+                    return Err(AppError::Config(format!(
+                        "config.toml: libraries `{}` and `{}` point at the same repository (`{}`); configure each repository at most once",
+                        other, lib.name, remote.normalized
+                    )));
+                }
+                seen.push((remote.normalized, &lib.name));
+            }
+        }
         let defaults = self.libraries.iter().filter(|l| l.default).count();
         if defaults != 1 {
             return Err(AppError::Config(format!(
@@ -552,6 +572,42 @@ default = true
         // save() would then persist, dropping the operator's libraries.
         assert!(parse("library = \"oops\"\n").is_err());
         assert!(parse("library = 42\n").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_same_repo_under_two_libraries() {
+        // The access-gate bypass H1: a `read` source and a `write` sibling
+        // pointing at the same repo (different URL spellings) must be rejected,
+        // so a skill's access can't be decided by config order.
+        let cfg = Config {
+            libraries: vec![
+                Library {
+                    name: "upstream".into(),
+                    url: "git@github.com:o/r.git".into(),
+                    access: Access::Read,
+                    default: true,
+                },
+                Library {
+                    name: "mine".into(),
+                    url: "https://github.com/o/r".into(),
+                    access: Access::Write,
+                    default: false,
+                },
+            ],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("same repository") && err.contains("o/r"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_distinct_repos() {
+        let cfg = Config {
+            libraries: vec![lib("a", true), lib("b", false)],
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

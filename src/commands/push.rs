@@ -31,6 +31,11 @@ struct Candidate {
     destination: PathBuf,
     status: SkillStatus,
     tags: Vec<String>,
+    /// The library this skill belongs to (its provenance) — `push` writes each
+    /// skill back to its own library, so a run may commit to several.
+    library_root: PathBuf,
+    library_name: String,
+    library_url: String,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -59,6 +64,9 @@ enum LibMissingChoice {
 struct Apply {
     candidate_index: usize,
     op: ApplyOp,
+    library_root: PathBuf,
+    library_name: String,
+    library_url: String,
 }
 
 enum ApplyOp {
@@ -91,36 +99,34 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     }
 
     let cfg = config::load()?;
-    let library = cfg.default_library().cloned().ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init <github-url>` first".into())
-    })?;
-
-    let library_root =
-        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
-    if !library_root.exists() {
-        return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skillctl init{}` again",
-            fs_util::display_path(&library_root),
-            library.url
-        ))
+    if cfg.libraries.is_empty() {
+        return Err(AppError::Config(
+            "no library configured — run `skillctl init <url>` first".into(),
+        )
         .into());
-    }
-    // Serialise all library-cache mutations (fetch + reset + add + commit +
-    // push) across concurrent skillctl processes. Released on function
-    // return.
-    let _cache_lock = lock::acquire_exclusive(&library_root, "library cache")?;
-
-    if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        ui::log_warning(
-            ctx,
-            format!(
-                "could not refresh library cache ({e}); diff is computed against the cached HEAD"
-            ),
-        )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
+
+    // `push` writes each skill back to its own provenance library, so a run
+    // may commit to several caches. Lock every configured library's existing
+    // cache up front (sorted + de-duplicated), then the project lock — keeping
+    // the always-cache-before-project rule. Locking by config (not by the
+    // manifest) is deterministic and avoids a read-before-lock race.
+    let mut lock_paths: Vec<PathBuf> = cfg
+        .libraries
+        .iter()
+        .filter_map(|l| config::library_cache_path(&l.url).ok())
+        .filter(|p| p.exists())
+        .collect();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut _cache_locks = Vec::with_capacity(lock_paths.len());
+    for p in &lock_paths {
+        _cache_locks.push(lock::acquire_exclusive(p, "library cache")?);
+    }
     let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
         ui::outro(
@@ -131,25 +137,81 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
+    let mut fetched = std::collections::HashSet::new();
     let mut candidates = Vec::new();
     for (index, installed) in project_cfg.installed.iter().enumerate() {
-        // Provenance routing: `push` writes back to the default library only.
-        // Skills installed from another configured library are skipped here —
-        // classifying them against the wrong cache would cross-contaminate.
-        // Cross-library push (`--to`) lands in a later release.
-        if !library.matches_provenance(
+        // Route each skill to the library it was installed from, then gate on
+        // that library's access: `push` commits directly only to `write`
+        // libraries. A `read` source can't be written back (promotion via
+        // `push --to` arrives next); a `pr` source needs the branch+MR/PR flow
+        // (Phase 10F). Either way, skip with a clear reason.
+        let library = match cfg.resolve_provenance(
             installed.library.as_deref(),
             installed.library_url.as_deref(),
         ) {
-            let origin = installed.library.as_deref().unwrap_or("another library");
-            ui::log_info(
-                ctx,
-                format!(
-                    "{} — installed from `{origin}`; skipping (push to non-default libraries arrives in a later release)",
-                    installed.name
-                ),
-            )?;
-            continue;
+            Some(l) => l,
+            None => {
+                let origin = installed
+                    .library
+                    .as_deref()
+                    .or(installed.library_url.as_deref())
+                    .unwrap_or("an unknown library");
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "{} — installed from `{origin}`, which is no longer configured; skipping (run `skillctl library add` to restore it)",
+                        installed.name
+                    ),
+                )?;
+                continue;
+            }
+        };
+        match library.access {
+            config::Access::Read => {
+                ui::log_info(
+                    ctx,
+                    format!(
+                        "{} — installed from read-only library `{}`; skipping (promotion to a writable library via `push --to` arrives in the next release)",
+                        installed.name, library.name
+                    ),
+                )?;
+                continue;
+            }
+            config::Access::Pr => {
+                ui::log_info(
+                    ctx,
+                    format!(
+                        "{} — library `{}` uses PR/MR review (access = pr); skipping (the branch + PR/MR flow arrives in the next release)",
+                        installed.name, library.name
+                    ),
+                )?;
+                continue;
+            }
+            config::Access::Write => {}
+        }
+        let library_root = match config::library_cache_path(&library.url) {
+            Ok(p) if p.exists() => p,
+            _ => {
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "{} — cache for library `{}` not found; skipping (run `skillctl library add {} {}` to clone it)",
+                        installed.name, library.name, library.name, library.url
+                    ),
+                )?;
+                continue;
+            }
+        };
+        if fetched.insert(library_root.clone()) {
+            if let Err(e) = git::fetch_and_fast_forward(&library_root) {
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "could not refresh `{}` ({e}); diff is computed against the cached HEAD",
+                        library.name
+                    ),
+                )?;
+            }
         }
         let status = classify(installed, &cwd, &library_root)?;
         let tags = skill::read_tags(&cwd.join(&installed.destination).join("SKILL.md"))
@@ -160,6 +222,9 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             destination: installed.destination.clone(),
             status,
             tags,
+            library_root,
+            library_name: library.name.clone(),
+            library_url: library.url.clone(),
         });
     }
 
@@ -268,7 +333,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     DivergenceChoice::Fork => Some(resolve_fork_op(
                         ctx,
                         installed,
-                        &library_root,
+                        &candidate.library_root,
                         args.fork_suffix.as_deref(),
                     )?),
                     DivergenceChoice::Skip => {
@@ -324,7 +389,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                     LibMissingChoice::Fork => Some(resolve_fork_op(
                         ctx,
                         installed,
-                        &library_root,
+                        &candidate.library_root,
                         args.fork_suffix.as_deref(),
                     )?),
                     LibMissingChoice::Skip => {
@@ -345,6 +410,9 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             applies.push(Apply {
                 candidate_index: candidate.index,
                 op,
+                library_root: candidate.library_root.clone(),
+                library_name: candidate.library_name.clone(),
+                library_url: candidate.library_url.clone(),
             });
         }
     }
@@ -354,6 +422,72 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         emit_json(ctx, &results, None);
         return Ok(());
     }
+
+    // `push` writes each skill back to its own library, and each library is a
+    // separate repo with its own commit + remote. Group the resolved applies
+    // by library cache and run the apply → commit → push → record sequence
+    // once per library. `commit` in the JSON reflects a single commit when the
+    // run touched exactly one library (the common case); across several
+    // libraries it is null and each result carries its own `source_sha`.
+    let mut grouped: std::collections::BTreeMap<PathBuf, Vec<Apply>> =
+        std::collections::BTreeMap::new();
+    for apply in applies {
+        grouped
+            .entry(apply.library_root.clone())
+            .or_default()
+            .push(apply);
+    }
+    let mut commits: Vec<(String, String)> = Vec::new();
+    for (_root, lib_applies) in grouped {
+        let group_commit = push_to_library(
+            ctx,
+            lib_applies,
+            &cwd,
+            &mut project_cfg,
+            args.message.as_deref(),
+            &mut results,
+        )?;
+        if let Some(c) = group_commit {
+            commits.push(c);
+        }
+    }
+
+    let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
+    let forked = results.iter().filter(|r| r["status"] == "forked").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let summary = match (pushed, forked, skipped) {
+        (u, 0, 0) => format!("pushed {u} skill(s)"),
+        (0, f, 0) => format!("forked {f} skill(s)"),
+        (u, f, 0) => format!("pushed {u}, forked {f}"),
+        (u, 0, s) => format!("pushed {u}, skipped {s}"),
+        (0, f, s) => format!("forked {f}, skipped {s}"),
+        (u, f, s) => format!("pushed {u}, forked {f}, skipped {s}"),
+    };
+    ui::outro(ctx, summary)?;
+    let commit_for_json = match commits.as_slice() {
+        [one] => Some((one.0.as_str(), one.1.as_str())),
+        _ => None,
+    };
+    emit_json(ctx, &results, commit_for_json);
+    Ok(())
+}
+
+/// Apply, commit, and push one library group. Mutates `project_cfg` in memory
+/// (source_sha updates / fork replacements), persists it, performs the
+/// fork local-folder renames, and appends per-skill JSON entries to `results`.
+/// Returns the new commit `(sha, message)` if the group committed anything.
+#[allow(clippy::too_many_arguments)]
+fn push_to_library(
+    ctx: &Context,
+    applies: Vec<Apply>,
+    cwd: &Path,
+    project_cfg: &mut project_config::ProjectConfig,
+    message_override: Option<&str>,
+    results: &mut Vec<Value>,
+) -> Result<Option<(String, String)>> {
+    let library_root = applies[0].library_root.clone();
+    let library_name = applies[0].library_name.clone();
+    let library_url = applies[0].library_url.clone();
 
     // Per-skill apply with continue-on-error. If one skill's
     // `replace_folder_contents` or `git add` fails, we (a) log a warning,
@@ -367,7 +501,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     for apply in applies {
         let installed = &project_cfg.installed[apply.candidate_index];
         let installed_name = installed.name.clone();
-        let local_dir = safe_join(&cwd, &installed.destination)?;
+        let local_dir = safe_join(cwd, &installed.destination)?;
         let (library_dir, library_relative) = match &apply.op {
             ApplyOp::Update => (
                 safe_join(&library_root, &installed.source_path)?,
@@ -413,15 +547,19 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     let applies = applies_kept;
 
     if applies.is_empty() {
-        ui::outro(ctx, "nothing pushed (all selected skills failed to apply)")?;
-        emit_json(ctx, &results, None);
-        return Ok(());
+        ui::log_warning(
+            ctx,
+            format!("nothing pushed to `{library_name}` (all selected skills failed to apply)"),
+        )?;
+        return Ok(None);
     }
 
     if !git::has_staged_changes(&library_root).map_err(|e| AppError::Git(e.to_string()))? {
-        ui::outro(ctx, "no effective changes after applying selections")?;
-        emit_json(ctx, &results, None);
-        return Ok(());
+        ui::log_info(
+            ctx,
+            format!("no effective changes after applying selections for `{library_name}`"),
+        )?;
+        return Ok(None);
     }
 
     let updates: Vec<&str> = applies
@@ -436,9 +574,8 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             _ => None,
         })
         .collect();
-    let message = args
-        .message
-        .clone()
+    let message = message_override
+        .map(str::to_string)
         .unwrap_or_else(|| build_commit_message(&updates, &adds));
 
     let new_sha = git::commit(&library_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
@@ -491,18 +628,18 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             } => {
                 let orig_name = project_cfg.installed[apply.candidate_index].name.clone();
                 let abs_old = safe_join(
-                    &cwd,
+                    cwd,
                     &project_cfg.installed[apply.candidate_index].destination,
                 )?;
-                let abs_new = safe_join(&cwd, new_local_destination)?;
+                let abs_new = safe_join(cwd, new_local_destination)?;
                 project_cfg.installed[apply.candidate_index] = InstalledSkill {
                     name: new_name.clone(),
                     source_path: new_library_path.clone(),
                     source_sha: new_sha.clone(),
                     destination: new_local_destination.clone(),
                     installed_at: installed_at.clone(),
-                    library: Some(library.name.clone()),
-                    library_url: Some(library.url.clone()),
+                    library: Some(library_name.clone()),
+                    library_url: Some(library_url.clone()),
                 };
                 tasks.push(PostSaveTask::Fork {
                     orig_name,
@@ -523,7 +660,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     // so the next run will reclassify and offer to pull — recoverable but
     // surprising. The atomic-rename in `project_config::save` keeps the
     // failure window to "disk full" / "EACCES" rather than partial writes.
-    project_config::save(&cwd, &project_cfg)?;
+    project_config::save(cwd, project_cfg)?;
 
     // Phase 3: local renames for forks + logging. Rename errors here are
     // surfaced as warnings but do NOT propagate — the library and
@@ -591,20 +728,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         }
     }
 
-    let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
-    let forked = results.iter().filter(|r| r["status"] == "forked").count();
-    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
-    let summary = match (pushed, forked, skipped) {
-        (u, 0, 0) => format!("pushed {u} skill(s)"),
-        (0, f, 0) => format!("forked {f} skill(s)"),
-        (u, f, 0) => format!("pushed {u}, forked {f}"),
-        (u, 0, s) => format!("pushed {u}, skipped {s}"),
-        (0, f, s) => format!("forked {f}, skipped {s}"),
-        (u, f, s) => format!("pushed {u}, forked {f}, skipped {s}"),
-    };
-    ui::outro(ctx, summary)?;
-    emit_json(ctx, &results, Some((new_sha.as_str(), message.as_str())));
-    Ok(())
+    Ok(Some((new_sha, message)))
 }
 
 fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {

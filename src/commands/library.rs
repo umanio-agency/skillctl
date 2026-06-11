@@ -81,6 +81,23 @@ fn add(args: LibraryAddArgs, ctx: &Context) -> Result<()> {
             AppError::Conflict(format!("a library named `{}` already exists", args.name)).into(),
         );
     }
+    // Reject a second library pointing at the same repository before cloning.
+    // Two libraries sharing one normalized URL would share a cache and let the
+    // access gate be decided by config order rather than intent (see
+    // `Config::validate`, which is the load/save-time backstop).
+    if let Ok(want) = crate::host::parse_remote_url(&args.url) {
+        if let Some(existing) = cfg.libraries.iter().find(|l| {
+            crate::host::parse_remote_url(&l.url)
+                .map(|have| have.normalized == want.normalized)
+                .unwrap_or(false)
+        }) {
+            return Err(AppError::Conflict(format!(
+                "library `{}` already points at that repository (`{}`); configure each repository at most once",
+                existing.name, want.normalized
+            ))
+            .into());
+        }
+    }
 
     let access: Access = args.access.into();
     let make_default = args.default || cfg.libraries.is_empty();
