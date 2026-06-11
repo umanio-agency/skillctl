@@ -53,7 +53,19 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl add")?;
 
     let cfg = config::load()?;
-    if args.from.as_deref() == Some("all") {
+    let has_selection = args.all || !args.skills.is_empty() || !args.tags.is_empty();
+    let from_all = args.from.as_deref() == Some("all");
+    // Interactive cross-library browsing via tabs: an explicit `--from all`, or
+    // a plain `add` when several libraries are configured — both only when no
+    // selection flag pins the choice. `--from <name>` always targets one
+    // library (no tabs).
+    if ctx.interactive
+        && !has_selection
+        && (from_all || (args.from.is_none() && cfg.libraries.len() > 1))
+    {
+        return run_tabbed(&args, ctx, &cfg);
+    }
+    if from_all {
         return run_multi(&args, ctx, &cfg);
     }
     let library = cfg.resolve_read(args.from.as_deref())?.clone();
@@ -290,7 +302,7 @@ fn run_multi(args: &AddArgs, ctx: &Context, cfg: &config::Config) -> Result<()> 
     }
     if !args.all && args.skills.is_empty() && args.tags.is_empty() {
         return Err(AppError::Config(
-            "`--from all` needs a selection: pass --all, --skill <name>, or --tag <name> (interactive cross-library browsing is coming)".into(),
+            "`--from all` needs a selection in non-interactive mode: pass --all, --skill <name>, or --tag <name> (or run interactively to browse libraries with tabs)".into(),
         )
         .into());
     }
@@ -402,6 +414,133 @@ fn run_multi(args: &AddArgs, ctx: &Context, cfg: &config::Config) -> Result<()> 
         return Ok(());
     }
 
+    install_multi_source(args, ctx, &cwd, selected)
+}
+
+/// Interactive multi-library install: open the picker with a tab per library
+/// (default first), discovered eagerly before entering raw mode so no git work
+/// runs inside the TUI. Selection accumulates across tabs and feeds the same
+/// install path as `--from all`. Reached only in interactive mode with no
+/// selection flags.
+fn run_tabbed(args: &AddArgs, ctx: &Context, cfg: &config::Config) -> Result<()> {
+    if cfg.libraries.is_empty() {
+        return Err(AppError::Config(
+            "no libraries configured — run `skillctl init <url>` or `skillctl library add <name> <url>` first".into(),
+        )
+        .into());
+    }
+    if args.no_audit && cfg.libraries.iter().any(|l| !l.default) {
+        return Err(AppError::Config(
+            "refusing --no-audit: a non-default (third-party) library is configured and its content is always audited; drop --no-audit".into(),
+        )
+        .into());
+    }
+
+    // Default library first → it becomes the opening tab.
+    let mut libs: Vec<&config::Library> = Vec::new();
+    if let Some(d) = cfg.default_library() {
+        libs.push(d);
+    }
+    for l in &cfg.libraries {
+        if !l.default {
+            libs.push(l);
+        }
+    }
+
+    let mut reachable: Vec<(&config::Library, PathBuf)> = Vec::new();
+    for lib in libs {
+        match config::library_cache_path(&lib.url) {
+            Ok(p) if p.exists() => reachable.push((lib, p)),
+            Ok(p) => ui::log_warning(
+                ctx,
+                format!(
+                    "skipping `{}`: cache not found at {} (re-clone with `skillctl library add {} <url>`)",
+                    lib.name,
+                    fs_util::display_path(&p),
+                    lib.name
+                ),
+            )?,
+            Err(e) => ui::log_warning(ctx, format!("skipping `{}`: {e}", lib.name))?,
+        }
+    }
+    if reachable.is_empty() {
+        return Err(AppError::Config("no reachable libraries to install from".into()).into());
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    // Every distinct cache lock first (sorted + deduped, so concurrent runs
+    // request them in the same order), then the project lock — the same
+    // cache-before-project ordering as `run_multi`; non-blocking, so a
+    // contended run fails fast rather than hanging.
+    let mut lock_paths: Vec<PathBuf> = reachable.iter().map(|(_, p)| p.clone()).collect();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut _cache_locks = Vec::with_capacity(lock_paths.len());
+    for p in &lock_paths {
+        _cache_locks.push(lock::acquire_exclusive(p, "library cache")?);
+    }
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+
+    // Eager per-tab discovery (before raw mode).
+    let mut prompt = crate::prompt::tabbed::<(Skill, config::Library, PathBuf)>(
+        "Skills to install — ←/→ switch library",
+    )
+    .required(true);
+    let mut total = 0usize;
+    for (lib, root) in &reachable {
+        if let Err(e) = git::fetch_and_fast_forward(root) {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "could not refresh `{}` ({e}); using cached version",
+                    lib.name
+                ),
+            )?;
+        }
+        let discovered = skill::discover(root, false)?;
+        for w in &discovered.warnings {
+            ui::log_warning(ctx, w)?;
+        }
+        let items: Vec<((Skill, config::Library, PathBuf), String, String)> = discovered
+            .skills
+            .into_iter()
+            .map(|s| {
+                let label = s.name.clone();
+                let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+                ((s, (*lib).clone(), root.clone()), label, hint)
+            })
+            .collect();
+        total += items.len();
+        prompt = prompt.tab(lib.name.clone(), items);
+    }
+
+    if total == 0 {
+        ui::outro(ctx, "no skills found in any configured library")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    let selected = prompt.interact()?;
+    if selected.is_empty() {
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    install_multi_source(args, ctx, &cwd, selected)
+}
+
+/// Shared install tail for multi-source add: plan collision-suffixed names,
+/// audit the whole span (atomic on `--fail-on`), copy each skill, and record
+/// provenance. Used by both flag-driven `--from all` and the interactive
+/// library-tabs path. Cache + project locks are held by the caller.
+fn install_multi_source(
+    args: &AddArgs,
+    ctx: &Context,
+    cwd: &Path,
+    selected: Vec<(Skill, config::Library, PathBuf)>,
+) -> Result<()> {
+    let cwd = cwd.to_path_buf();
     let dest_root = resolve_destination(args, ctx, &cwd)?;
     let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
     let mut project_cfg = project_config::load(&cwd)?;

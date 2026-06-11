@@ -76,6 +76,7 @@ skillctl library set-default <name>
 - `library add` clones the repo immediately (fail-fast on a bad URL/credentials). Added libraries default to `--access read` so you can't push to them by accident. The name `all` is reserved.
 - The default library is what every command acts on when you don't say otherwise. `--from <name>` (on `list`/`add`) reads from another library; non-default reads are treated as **untrusted third-party content** (see the audit notes below).
 - `push`/`pull` currently act only on skills whose provenance is the default library; skills installed from another library are listed and skipped (cross-library write-back arrives in a later release).
+- **Interactive only:** running `skillctl add` in a terminal with more than one library configured (or `skillctl add --from all`) opens a picker with a **tab per library** (←/→ to switch, opens on the default); selections accumulate across tabs into one install. Agents/non-interactive runs use the flags above instead.
 
 ## Commands
 
@@ -110,7 +111,7 @@ skillctl add --from all --tag <tag> --dest <path>         # install matching ski
 
 | Flag | Purpose | Required in non-interactive |
 |---|---|---|
-| `--from <name>` | Install from a named library instead of the default. `--from all` installs matching skills from **every** configured library in one run (requires a selection — `--all`/`--skill`/`--tag`; interactive cross-library browsing is not available yet). Installing from any non-default library forces the content audit on (see below). | No |
+| `--from <name>` | Install from a named library instead of the default. `--from all` installs matching skills from **every** configured library in one run (non-interactive: requires a selection — `--all`/`--skill`/`--tag`). Installing from any non-default library forces the content audit on (see below). | No |
 | `--skill <name>` | Install a specific skill (repeatable). Mutually exclusive with `--all` and `--tag`. | Yes, unless `--all` or `--tag` |
 | `--all` | Install every skill in the library. Mutually exclusive with `--skill` and `--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Install every skill carrying this tag (repeatable). Default semantics is union (any of the given tags). Mutually exclusive with `--skill` and `--all`. | Yes, unless `--skill` or `--all` |
