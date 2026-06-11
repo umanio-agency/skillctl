@@ -130,6 +130,24 @@ impl Config {
         }
     }
 
+    /// Find the configured library an installed skill belongs to, given the
+    /// provenance recorded in its `.skills.toml` entry. This is the inverse of
+    /// `Library::matches_provenance` and the routing primitive `push`/`pull`
+    /// use to send each skill back to the right library: it reuses the same
+    /// fail-closed matching (a present-but-foreign `library_url` matches no
+    /// library; absence of any provenance resolves to the default). Returns
+    /// `None` when the recorded provenance points at a library that is no
+    /// longer configured.
+    pub fn resolve_provenance(
+        &self,
+        library: Option<&str>,
+        library_url: Option<&str>,
+    ) -> Option<&Library> {
+        self.libraries
+            .iter()
+            .find(|l| l.matches_provenance(library, library_url))
+    }
+
     /// Register a library, enforcing name uniqueness. The new library becomes
     /// the sole default when `make_default` is set or it is the first one.
     pub fn add_library(&mut self, mut lib: Library, make_default: bool) -> Result<(), AppError> {
@@ -665,6 +683,43 @@ default = true
     fn resolve_read_no_library_errors() {
         let cfg = Config::default();
         assert!(cfg.resolve_read(None).is_err());
+    }
+
+    #[test]
+    fn resolve_provenance_routes_to_owning_library() {
+        let mut cfg = Config::default();
+        cfg.add_library(
+            Library {
+                name: "personal".into(),
+                url: "https://github.com/o/personal".into(),
+                access: Access::Write,
+                default: true,
+            },
+            true,
+        )
+        .unwrap();
+        cfg.add_library(
+            Library {
+                name: "team".into(),
+                url: "https://github.com/o/team".into(),
+                access: Access::Write,
+                default: false,
+            },
+            false,
+        )
+        .unwrap();
+        // By URL (durable key), across spellings.
+        let r = cfg
+            .resolve_provenance(Some("whatever"), Some("git@github.com:o/team.git"))
+            .unwrap();
+        assert_eq!(r.name, "team");
+        // No provenance → default library.
+        assert_eq!(cfg.resolve_provenance(None, None).unwrap().name, "personal");
+        // A URL matching no configured library → None (removed/renamed repo).
+        assert!(
+            cfg.resolve_provenance(Some("team"), Some("https://github.com/o/gone"))
+                .is_none()
+        );
     }
 
     #[test]

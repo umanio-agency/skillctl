@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,9 @@ struct Candidate {
     destination: PathBuf,
     status: SkillStatus,
     tags: Vec<String>,
+    /// Cache root of the library this skill was installed from — `pull`
+    /// refreshes each skill from its own provenance library, not a single one.
+    library_root: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -55,6 +59,7 @@ impl From<OnDivergence> for DivergenceChoice {
 struct Apply {
     candidate_index: usize,
     op: ApplyOp,
+    library_root: PathBuf,
 }
 
 enum ApplyOp {
@@ -76,33 +81,35 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     }
 
     let cfg = config::load()?;
-    let library = cfg.default_library().cloned().ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init <github-url>` first".into())
-    })?;
-
-    let library_root =
-        config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
-    if !library_root.exists() {
-        return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skillctl init{}` again",
-            fs_util::display_path(&library_root),
-            library.url
-        ))
+    if cfg.libraries.is_empty() {
+        return Err(AppError::Config(
+            "no library configured — run `skillctl init <url>` first".into(),
+        )
         .into());
-    }
-    let _cache_lock = lock::acquire_exclusive(&library_root, "library cache")?;
-
-    if let Err(e) = git::fetch_and_fast_forward(&library_root) {
-        ui::log_warning(
-            ctx,
-            format!(
-                "could not refresh library cache ({e}); diff is computed against the cached HEAD"
-            ),
-        )?;
     }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
+
+    // `pull` follows each skill's provenance, so a run can touch several
+    // library caches. Lock every configured library's *existing* cache up
+    // front (sorted + de-duplicated, so concurrent runs acquire in the same
+    // order) and keep the always-cache-before-project rule. Locking by config
+    // (not by the manifest) is deterministic and avoids a read-before-lock
+    // race; the handful of extra locks are the operator's own caches.
+    let mut lock_paths: Vec<PathBuf> = cfg
+        .libraries
+        .iter()
+        .filter_map(|l| config::library_cache_path(&l.url).ok())
+        .filter(|p| p.exists())
+        .collect();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut _cache_locks = Vec::with_capacity(lock_paths.len());
+    for p in &lock_paths {
+        _cache_locks.push(lock::acquire_exclusive(p, "library cache")?);
+    }
     let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+
     let mut project_cfg = project_config::load(&cwd)?;
     if project_cfg.installed.is_empty() {
         ui::outro(
@@ -113,25 +120,55 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
+    let mut fetched: HashSet<PathBuf> = HashSet::new();
     let mut candidates = Vec::new();
     for (index, installed) in project_cfg.installed.iter().enumerate() {
-        // Provenance routing: `pull` refreshes from the default library only.
-        // Skills installed from another configured library are skipped here —
-        // classifying them against the wrong cache would mis-resolve their
-        // source paths. Cross-library pull lands in a later release.
-        if !library.matches_provenance(
+        // Route each skill to the library it was installed from.
+        let library = match cfg.resolve_provenance(
             installed.library.as_deref(),
             installed.library_url.as_deref(),
         ) {
-            let origin = installed.library.as_deref().unwrap_or("another library");
-            ui::log_info(
-                ctx,
-                format!(
-                    "{} — installed from `{origin}`; skipping (pull from non-default libraries arrives in a later release)",
-                    installed.name
-                ),
-            )?;
-            continue;
+            Some(l) => l,
+            None => {
+                let origin = installed
+                    .library
+                    .as_deref()
+                    .or(installed.library_url.as_deref())
+                    .unwrap_or("an unknown library");
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "{} — installed from `{origin}`, which is no longer configured; skipping (run `skillctl library add` to restore it)",
+                        installed.name
+                    ),
+                )?;
+                continue;
+            }
+        };
+        let library_root = match config::library_cache_path(&library.url) {
+            Ok(p) if p.exists() => p,
+            _ => {
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "{} — cache for library `{}` not found; skipping (run `skillctl library add {} {}` to clone it)",
+                        installed.name, library.name, library.name, library.url
+                    ),
+                )?;
+                continue;
+            }
+        };
+        // Refresh each involved cache once per run.
+        if fetched.insert(library_root.clone()) {
+            if let Err(e) = git::fetch_and_fast_forward(&library_root) {
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "could not refresh `{}` ({e}); diff is computed against the cached HEAD",
+                        library.name
+                    ),
+                )?;
+            }
         }
         let status = classify(installed, &cwd, &library_root)?;
         let tags = skill::read_tags(&cwd.join(&installed.destination).join("SKILL.md"))
@@ -142,6 +179,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
             destination: installed.destination.clone(),
             status,
             tags,
+            library_root,
         });
     }
 
@@ -279,6 +317,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
             applies.push(Apply {
                 candidate_index: candidate.index,
                 op,
+                library_root: candidate.library_root.clone(),
             });
         }
     }
@@ -288,8 +327,6 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         emit_json(ctx, &results);
         return Ok(());
     }
-
-    let new_sha = git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     // Continue-on-error per apply: a single skill failing should not abort
     // the others or lose the saved state of earlier successes. The save at
@@ -303,13 +340,26 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         let installed_source_path = project_cfg.installed[apply.candidate_index]
             .source_path
             .clone();
+        // The new source_sha is the HEAD of *this skill's* library cache.
+        let new_sha = match git::head_sha(&apply.library_root) {
+            Ok(sha) => sha,
+            Err(e) => {
+                let _ = ui::log_warning(ctx, format!("pull failed for `{installed_name}`: {e}"));
+                results.push(json!({
+                    "name": installed_name,
+                    "status": "failed",
+                    "reason": e.to_string(),
+                }));
+                continue;
+            }
+        };
         let outcome: Result<()> = (|| {
             // Belt-and-suspenders: `installed.destination` and `installed.source_path`
             // are validated at `project_config::load` time, but `safe_join` re-checks
             // at the destructive call site to defend against any future code path
             // that constructs `InstalledSkill` without going through load.
             let local_dir = safe_join(&cwd, &installed_destination)?;
-            let library_dir = safe_join(&library_root, &installed_source_path)?;
+            let library_dir = safe_join(&apply.library_root, &installed_source_path)?;
 
             match &apply.op {
                 ApplyOp::Pull => {
