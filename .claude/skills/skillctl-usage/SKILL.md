@@ -223,9 +223,10 @@ skillctl detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-pat
 | `--all` | Add every detected new skill. Mutually exclusive with `--skill`/`--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Add every newly detected skill carrying this tag (repeatable). Default semantics is union. Mutually exclusive with `--skill`/`--all`. | Yes, unless `--skill` or `--all` |
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. | No |
+| `--to <name>` | Writable library to add the skills to. Defaults to the sole `write`-access library; **required when several are configured**. Refused for `read`/`pr` libraries. | Yes, when more than one writable library is configured |
 | `--target <path>` | Library-relative folder where the new skills should land. Use `.` for the library root (flat-layout libraries), or e.g. `skills` / `.claude/skills` for a subfolder. | **Yes** |
 
-`skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.
+`skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the chosen library's cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml` with that library's provenance. The target library is the sole writable library by default; with several, pass `--to <name>` (non-interactive) or pick from the Select (interactive). `read`/`pr` libraries cannot be detect targets (the latter pending the PR/MR flow).
 
 ### `skillctl remove` — remove skills from the current project
 
