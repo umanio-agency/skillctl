@@ -238,6 +238,12 @@ pub struct PullArgs {
 
 #[derive(Args, Debug)]
 pub struct DetectArgs {
+    /// Library to add the new skills to, by name. Must be a writable library.
+    /// Defaults to the sole writable library; required when several are
+    /// configured (non-interactive) or chosen interactively.
+    #[arg(long, value_name = "NAME")]
+    pub to: Option<String>,
+
     /// Name of a new local skill to add. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,

@@ -148,6 +148,44 @@ impl Config {
             .find(|l| l.matches_provenance(library, library_url))
     }
 
+    /// Resolve a write command's explicitly named target library (`--to`),
+    /// `None` → the default library. The target must not be `read` — a
+    /// read-only source is refused with a pointer to fixing access. (`pr` is
+    /// allowed through here; the caller decides between a direct commit and the
+    /// branch + PR/MR flow.)
+    pub fn resolve_write(&self, to: Option<&str>) -> Result<&Library, AppError> {
+        let lib = match to {
+            None => self.default_library().ok_or_else(|| {
+                AppError::Config("no library configured — run `skillctl init <url>` first".into())
+            })?,
+            Some(name) => self.by_name(name).ok_or_else(|| {
+                AppError::Config(format!(
+                    "no library named `{name}` — run `skillctl library list` to see configured libraries"
+                ))
+            })?,
+        };
+        if lib.access == Access::Read {
+            return Err(AppError::Config(format!(
+                "library `{}` is read-only (access = read); choose a writable library with `--to <name>`, or grant it write access in your config",
+                lib.name
+            )));
+        }
+        Ok(lib)
+    }
+
+    /// The configured libraries a write command can target directly (`write`
+    /// access), default library first. Used to pick a target when `--to` is
+    /// omitted: zero ⇒ error, one ⇒ use it, many ⇒ ambiguous (Select / `--to`).
+    pub fn write_targets(&self) -> Vec<&Library> {
+        let mut v: Vec<&Library> = self
+            .libraries
+            .iter()
+            .filter(|l| l.access == Access::Write)
+            .collect();
+        v.sort_by_key(|l| !l.default);
+        v
+    }
+
     /// Register a library, enforcing name uniqueness. The new library becomes
     /// the sole default when `make_default` is set or it is the first one.
     pub fn add_library(&mut self, mut lib: Library, make_default: bool) -> Result<(), AppError> {
@@ -739,6 +777,52 @@ default = true
     fn resolve_read_no_library_errors() {
         let cfg = Config::default();
         assert!(cfg.resolve_read(None).is_err());
+    }
+
+    fn lib_access(name: &str, access: Access, default: bool) -> Library {
+        Library {
+            name: name.to_string(),
+            url: format!("https://github.com/o/{name}"),
+            access,
+            default,
+        }
+    }
+
+    #[test]
+    fn resolve_write_refuses_read_and_allows_write_pr() {
+        let mut cfg = Config::default();
+        cfg.add_library(lib_access("src", Access::Read, true), true)
+            .unwrap();
+        cfg.add_library(lib_access("mine", Access::Write, false), false)
+            .unwrap();
+        cfg.add_library(lib_access("team", Access::Pr, false), false)
+            .unwrap();
+        // Default (src) is read-only → refused.
+        let err = cfg.resolve_write(None).unwrap_err().to_string();
+        assert!(err.contains("read-only"), "got: {err}");
+        // Named write + pr both resolve.
+        assert_eq!(cfg.resolve_write(Some("mine")).unwrap().name, "mine");
+        assert_eq!(cfg.resolve_write(Some("team")).unwrap().access, Access::Pr);
+        // Unknown name errors.
+        assert!(cfg.resolve_write(Some("ghost")).is_err());
+    }
+
+    #[test]
+    fn write_targets_lists_write_libs_default_first() {
+        let mut cfg = Config::default();
+        cfg.add_library(lib_access("src", Access::Read, true), true)
+            .unwrap();
+        cfg.add_library(lib_access("a", Access::Write, false), false)
+            .unwrap();
+        cfg.add_library(lib_access("b", Access::Write, false), false)
+            .unwrap();
+        cfg.set_default("b").unwrap();
+        let t = cfg.write_targets();
+        // read lib excluded; default (b) first.
+        assert_eq!(
+            t.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            ["b", "a"]
+        );
     }
 
     #[test]
