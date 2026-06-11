@@ -75,7 +75,8 @@ skillctl library set-default <name>
 
 - `library add` clones the repo immediately (fail-fast on a bad URL/credentials). Added libraries default to `--access read` so you can't push to them by accident. The name `all` is reserved.
 - The default library is what every command acts on when you don't say otherwise. `--from <name>` (on `list`/`add`) reads from another library; non-default reads are treated as **untrusted third-party content** (see the audit notes below).
-- `push`/`pull` currently act only on skills whose provenance is the default library; skills installed from another library are listed and skipped (cross-library write-back arrives in a later release).
+- `pull` **follows each skill's provenance** — a skill installed from any configured library refreshes from that library. A skill whose recorded provenance is no longer configured is listed and skipped (run `skillctl library add` to restore it).
+- `push` currently writes back only to skills whose provenance is the default library; skills installed from another library are listed and skipped (cross-library `push --to` arrives in the next release).
 - **Interactive only:** running `skillctl add` in a terminal with more than one library configured (or `skillctl add --from all`) opens a picker with a **tab per library** (←/→ to switch, opens on the default); selections accumulate across tabs into one install. Agents/non-interactive runs use the flags above instead.
 
 ## Commands
@@ -203,7 +204,7 @@ skillctl pull --tag <tag> [--tag <tag> …] [--all-tags]
 | `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent skills. `fork` here means **fork-locally** (rename the local copy under a new name, then pull the library version into the original destination). Default when omitted: skip. |
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New local name = `<original>-<suffix>`. |
 
-For each pullable skill, `skillctl pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow. Skills whose provenance is a **non-default** library are listed and skipped — `pull` refreshes only from the default library for now.
+For each pullable skill, `skillctl pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow. `pull` **follows provenance**: each skill refreshes from the library it was installed from (a run may touch several library caches), and its `source_sha` is rewritten to *that* library's HEAD. A skill whose recorded provenance is no longer a configured library is listed and skipped.
 
 **Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: each divergent skill's local folder is renamed to `<original>-<suffix>`, then the library version drops into the original destination.
 
