@@ -33,7 +33,7 @@ Per-command top-level shape:
 {"command":"add","destination":"…|null","results":[{"name":"…","status":"installed|skipped|aborted","…":"…"}],"summary":{"installed":N,"skipped":N,"aborted":N}}
 
 // push
-{"command":"push","results":[{"name":"…","status":"pushed|forked|skipped","operation":"update|fork","…":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"pushed":N,"forked":N,"skipped":N}}
+{"command":"push","results":[{"name":"…","status":"pushed|forked|pr_opened|skipped","operation":"update|fork|pr","pr_url":"…","branch":"…","…":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"pushed":N,"forked":N,"pr_opened":N,"skipped":N}}
 
 // pull
 {"command":"pull","results":[{"name":"…","status":"pulled|skipped","fork_local":"…|null","fork_local_path":"…","source_sha":"…"}],"summary":{"pulled":N,"forked_locally":N,"skipped":N}}
@@ -76,7 +76,7 @@ skillctl library set-default <name>
 - `library add` clones the repo immediately (fail-fast on a bad URL/credentials). Added libraries default to `--access read` so you can't push to them by accident. The name `all` is reserved.
 - The default library is what every command acts on when you don't say otherwise. `--from <name>` (on `list`/`add`) reads from another library; non-default reads are treated as **untrusted third-party content** (see the audit notes below).
 - `pull` and `push` both **follow each skill's provenance** — a skill installed from any configured library is refreshed from / written back to that library (a run may touch several). A skill whose recorded provenance is no longer configured is listed and skipped (run `skillctl library add` to restore it).
-- `push` commits directly only to `write`-access libraries. A skill from a `read`-access source is skipped (promotion via `push --to` arrives next); a skill from a `pr`-access library is skipped pending the branch + PR/MR flow.
+- `push` to a `write`-access library commits directly; to a `pr`-access library it pushes a `skillctl/<slug>` branch and opens a PR (`gh`) or MR (`glab`), returning the URL. A skill from a `read`-access source is skipped (promotion via `push --to` arrives next). Opening a PR/MR uses your existing `gh`/`glab` auth — no token is stored; unsupported hosts get a "push done, open it manually" message.
 - Each repository may be configured at most once: `skillctl library add` refuses a URL that resolves to an already-configured repo (same repo under two access levels would make a skill's write target depend on config order).
 - **Interactive only:** running `skillctl add` in a terminal with more than one library configured (or `skillctl add --from all`) opens a picker with a **tab per library** (←/→ to switch, opens on the default); selections accumulate across tabs into one install. Agents/non-interactive runs use the flags above instead.
 
@@ -182,9 +182,15 @@ skillctl push --tag <tag> [--tag <tag> …] [--all-tags]
 | `--all-tags` | Switch tag matching to intersection (skill must carry every requested tag). Requires `--tag`. |
 | `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent (and library-missing) skills. Default when omitted: skip with a warning. |
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New name = `<original>-<suffix>`. |
-| `--message <text>` | Override the auto-generated commit message. |
+| `--message <text>` | Override the auto-generated commit message. For a `pr`-access library it is also the PR/MR description. |
+| `--pr-title <title>` | Title for the PR/MR opened against a `pr`-access library (default: auto-generated). Ignored for `write` libraries. |
+| `--yes` | Skip the interactive PR/MR confirmation (open it without prompting). Always implied in non-interactive mode. |
 
-For each pushable skill, `skillctl push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits and pushes to the library remote. `push` **follows provenance**: each skill is written back to the library it was installed from, with **one commit per library** (a run touching several libraries makes several commits). The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to that library's new HEAD. Skills from `read`/`pr` libraries, and skills whose provenance is no longer configured, are listed and skipped (see the access notes above). In `--json`, `commit` is the single commit when exactly one library was pushed, otherwise `null` (each result still carries its `source_sha`).
+For each pushable skill, `skillctl push` runs a content diff (via git blob hashes) and applies the chosen strategy. `push` **follows provenance**: each skill is written back to the library it was installed from.
+- For a `write` library: commits and pushes to its default branch, **one commit per library** (a run touching several makes several commits); each pushed `.skills.toml` entry's `source_sha` is rewritten to that library's new HEAD. In `--json`, `commit` is the single commit when exactly one `write` library was pushed, otherwise `null` (each result carries its `source_sha`).
+- For a `pr` library: pushes a `skillctl/<slug>` branch and opens a PR (`gh`) / MR (`glab`); the result carries `"status":"pr_opened"`, `"pr_url"`, and `"branch"`, and the URL is shown in the outro. `.skills.toml` is **not** changed (the skill isn't merged yet). Interactive runs show an editable title + confirm; `--yes`/non-interactive open it directly.
+
+Skills from `read` libraries, and skills whose provenance is no longer configured, are listed and skipped (see the access notes above).
 
 **Fork** (creating a new library skill from local edits) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: every divergent (or library-missing) skill is forked under the name `<original>-<suffix>`.
 
