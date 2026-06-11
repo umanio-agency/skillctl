@@ -75,8 +75,9 @@ skillctl library set-default <name>
 
 - `library add` clones the repo immediately (fail-fast on a bad URL/credentials). Added libraries default to `--access read` so you can't push to them by accident. The name `all` is reserved.
 - The default library is what every command acts on when you don't say otherwise. `--from <name>` (on `list`/`add`) reads from another library; non-default reads are treated as **untrusted third-party content** (see the audit notes below).
-- `pull` **follows each skill's provenance** — a skill installed from any configured library refreshes from that library. A skill whose recorded provenance is no longer configured is listed and skipped (run `skillctl library add` to restore it).
-- `push` currently writes back only to skills whose provenance is the default library; skills installed from another library are listed and skipped (cross-library `push --to` arrives in the next release).
+- `pull` and `push` both **follow each skill's provenance** — a skill installed from any configured library is refreshed from / written back to that library (a run may touch several). A skill whose recorded provenance is no longer configured is listed and skipped (run `skillctl library add` to restore it).
+- `push` commits directly only to `write`-access libraries. A skill from a `read`-access source is skipped (promotion via `push --to` arrives next); a skill from a `pr`-access library is skipped pending the branch + PR/MR flow.
+- Each repository may be configured at most once: `skillctl library add` refuses a URL that resolves to an already-configured repo (same repo under two access levels would make a skill's write target depend on config order).
 - **Interactive only:** running `skillctl add` in a terminal with more than one library configured (or `skillctl add --from all`) opens a picker with a **tab per library** (←/→ to switch, opens on the default); selections accumulate across tabs into one install. Agents/non-interactive runs use the flags above instead.
 
 ## Commands
@@ -183,7 +184,7 @@ skillctl push --tag <tag> [--tag <tag> …] [--all-tags]
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New name = `<original>-<suffix>`. |
 | `--message <text>` | Override the auto-generated commit message. |
 
-For each pushable skill, `skillctl push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits **once** for the whole run and pushes to the library remote. The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to the new HEAD. Skills whose provenance is a **non-default** library are listed and skipped — `push` writes back only to the default library for now.
+For each pushable skill, `skillctl push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits and pushes to the library remote. `push` **follows provenance**: each skill is written back to the library it was installed from, with **one commit per library** (a run touching several libraries makes several commits). The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to that library's new HEAD. Skills from `read`/`pr` libraries, and skills whose provenance is no longer configured, are listed and skipped (see the access notes above). In `--json`, `commit` is the single commit when exactly one library was pushed, otherwise `null` (each result still carries its `source_sha`).
 
 **Fork** (creating a new library skill from local edits) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: every divergent (or library-missing) skill is forked under the name `<original>-<suffix>`.
 
