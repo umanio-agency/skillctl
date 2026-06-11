@@ -196,9 +196,20 @@ pub struct PushArgs {
     #[arg(long, value_name = "SUFFIX")]
     pub fork_suffix: Option<String>,
 
-    /// Override the auto-generated commit message.
+    /// Override the auto-generated commit message. For a `pr`-access library,
+    /// this is also the PR/MR description.
     #[arg(long, value_name = "MESSAGE")]
     pub message: Option<String>,
+
+    /// Title for the PR/MR opened against a `pr`-access library (defaults to an
+    /// auto-generated title). Ignored for `write` libraries.
+    #[arg(long, value_name = "TITLE")]
+    pub pr_title: Option<String>,
+
+    /// Skip the interactive PR/MR confirmation (open it without prompting).
+    /// Always implied in non-interactive mode.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]

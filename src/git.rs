@@ -402,6 +402,73 @@ pub fn push(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The repo's current branch name (`git rev-parse --abbrev-ref HEAD`). For a
+/// freshly fetch-and-fast-forwarded cache this is its default branch — the
+/// base a PR/MR targets.
+pub fn current_branch(repo: &Path) -> Result<String> {
+    let output = git_cmd()
+        .current_dir(repo)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .with_context(|| {
+            format!(
+                "invoking `git rev-parse --abbrev-ref HEAD` in {}",
+                repo.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`git rev-parse --abbrev-ref HEAD` failed in {}: {}",
+            repo.display(),
+            scrub_stderr(&output.stderr)
+        ));
+    }
+    let branch = String::from_utf8(output.stdout)
+        .context("`git rev-parse --abbrev-ref HEAD` returned non-UTF8 output")?;
+    Ok(branch.trim().to_string())
+}
+
+/// Create (or reset) a local branch and switch to it (`git checkout -B`). `-B`
+/// (not `-b`) so a stale branch left by an interrupted PR run is reused rather
+/// than aborting; the cache is disposable and single-writer-locked.
+pub fn create_branch(repo: &Path, name: &str) -> Result<()> {
+    run_git(repo, &["checkout", "--quiet", "-B", name])
+}
+
+/// Force-switch to an existing branch (`git checkout --force`). Used to return
+/// the cache to its base branch after a PR run; `--force` discards any
+/// working-tree residue so the restore can't fail and strand the cache off-base
+/// (which would wedge the next command's `fetch_and_fast_forward`). Safe — the
+/// cache is disposable and single-writer-locked.
+pub fn checkout_branch(repo: &Path, name: &str) -> Result<()> {
+    run_git(repo, &["checkout", "--quiet", "--force", name])
+}
+
+/// Push `branch` to `origin`, setting upstream (`git push -u origin <branch>`).
+/// `--force-with-lease` so re-running a PR for the same skill updates the
+/// existing `skillctl/<skill>` branch instead of failing on a non-fast-forward,
+/// while still refusing to clobber a branch that moved underneath us.
+pub fn push_branch(repo: &Path, branch: &str) -> Result<()> {
+    let output = git_cmd()
+        .current_dir(repo)
+        .args(["push", "--force-with-lease", "-u", "origin", branch])
+        .output()
+        .with_context(|| {
+            format!(
+                "invoking `git push -u origin {branch}` in {}",
+                repo.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`git push` of branch `{branch}` failed in {} (check your credentials and write access): {}",
+            repo.display(),
+            scrub_stderr(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
     let output = git_cmd()
         .current_dir(repo)

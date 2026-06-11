@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
-use cliclack::{input, select};
+use cliclack::{confirm, input, select};
 
 use crate::prompt::multiselect;
 use serde_json::{Value, json};
@@ -36,6 +36,7 @@ struct Candidate {
     library_root: PathBuf,
     library_name: String,
     library_url: String,
+    library_access: config::Access,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -67,6 +68,7 @@ struct Apply {
     library_root: PathBuf,
     library_name: String,
     library_url: String,
+    library_access: config::Access,
 }
 
 enum ApplyOp {
@@ -96,6 +98,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     // commit trailers (`Co-Authored-By:`, etc.) that downstream bots trust.
     if let Some(msg) = &args.message {
         validate_message_safe("--message", msg)?;
+    }
+    // `--pr-title` becomes the PR/MR title AND the branch commit message, so it
+    // must clear the same CRLF/trailer-forgery gate as `--message` — and here,
+    // before any commit/push, not only at PR-open time (the branch is pushed
+    // before `review` validates, so a late check would leak a forged commit).
+    if let Some(title) = &args.pr_title {
+        validate_message_safe("--pr-title", title)?;
     }
 
     let cfg = config::load()?;
@@ -166,28 +175,18 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 continue;
             }
         };
-        match library.access {
-            config::Access::Read => {
-                ui::log_info(
-                    ctx,
-                    format!(
-                        "{} — installed from read-only library `{}`; skipping (promotion to a writable library via `push --to` arrives in the next release)",
-                        installed.name, library.name
-                    ),
-                )?;
-                continue;
-            }
-            config::Access::Pr => {
-                ui::log_info(
-                    ctx,
-                    format!(
-                        "{} — library `{}` uses PR/MR review (access = pr); skipping (the branch + PR/MR flow arrives in the next release)",
-                        installed.name, library.name
-                    ),
-                )?;
-                continue;
-            }
-            config::Access::Write => {}
+        // A `read` source can't be written back (promotion via `push --to`
+        // arrives in a later release). `write` commits directly; `pr` opens a
+        // branch + PR/MR (handled per-library group below).
+        if library.access == config::Access::Read {
+            ui::log_info(
+                ctx,
+                format!(
+                    "{} — installed from read-only library `{}`; skipping (promotion to a writable library via `push --to` arrives in the next release)",
+                    installed.name, library.name
+                ),
+            )?;
+            continue;
         }
         let library_root = match config::library_cache_path(&library.url) {
             Ok(p) if p.exists() => p,
@@ -225,6 +224,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             library_root,
             library_name: library.name.clone(),
             library_url: library.url.clone(),
+            library_access: library.access,
         });
     }
 
@@ -413,6 +413,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
                 library_root: candidate.library_root.clone(),
                 library_name: candidate.library_name.clone(),
                 library_url: candidate.library_url.clone(),
+                library_access: candidate.library_access,
             });
         }
     }
@@ -439,29 +440,51 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     }
     let mut commits: Vec<(String, String)> = Vec::new();
     for (_root, lib_applies) in grouped {
-        let group_commit = push_to_library(
-            ctx,
-            lib_applies,
-            &cwd,
-            &mut project_cfg,
-            args.message.as_deref(),
-            &mut results,
-        )?;
-        if let Some(c) = group_commit {
-            commits.push(c);
+        let is_pr = lib_applies
+            .first()
+            .map(|a| a.library_access == config::Access::Pr)
+            .unwrap_or(false);
+        if is_pr {
+            push_to_library_via_pr(ctx, &args, lib_applies, &cwd, &project_cfg, &mut results)?;
+        } else {
+            let group_commit = push_to_library(
+                ctx,
+                lib_applies,
+                &cwd,
+                &mut project_cfg,
+                args.message.as_deref(),
+                &mut results,
+            )?;
+            if let Some(c) = group_commit {
+                commits.push(c);
+            }
         }
     }
 
     let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
     let forked = results.iter().filter(|r| r["status"] == "forked").count();
+    let pr_opened = results
+        .iter()
+        .filter(|r| r["status"] == "pr_opened")
+        .count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
-    let summary = match (pushed, forked, skipped) {
-        (u, 0, 0) => format!("pushed {u} skill(s)"),
-        (0, f, 0) => format!("forked {f} skill(s)"),
-        (u, f, 0) => format!("pushed {u}, forked {f}"),
-        (u, 0, s) => format!("pushed {u}, skipped {s}"),
-        (0, f, s) => format!("forked {f}, skipped {s}"),
-        (u, f, s) => format!("pushed {u}, forked {f}, skipped {s}"),
+    let mut parts = Vec::new();
+    if pushed > 0 {
+        parts.push(format!("pushed {pushed}"));
+    }
+    if forked > 0 {
+        parts.push(format!("forked {forked}"));
+    }
+    if pr_opened > 0 {
+        parts.push(format!("opened {pr_opened} PR/MR"));
+    }
+    if skipped > 0 {
+        parts.push(format!("skipped {skipped}"));
+    }
+    let summary = if parts.is_empty() {
+        "nothing to push".to_string()
+    } else {
+        parts.join(", ")
     };
     ui::outro(ctx, summary)?;
     let commit_for_json = match commits.as_slice() {
@@ -731,12 +754,216 @@ fn push_to_library(
     Ok(Some((new_sha, message)))
 }
 
+/// Open a PR/MR for one `pr`-access library group. Unlike `push_to_library`,
+/// this never commits to the library's default branch and never touches
+/// `.skills.toml`: the skill isn't merged yet. It creates a `skillctl/<slug>`
+/// branch off the base, applies the selected skills' content, commits, pushes
+/// the branch, and opens a PR/MR via `gh`/`glab`, then returns the cache to its
+/// base branch. Appends a `pr_opened` result (with the request URL) per group.
+fn push_to_library_via_pr(
+    ctx: &Context,
+    args: &PushArgs,
+    applies: Vec<Apply>,
+    cwd: &Path,
+    project_cfg: &project_config::ProjectConfig,
+    results: &mut Vec<Value>,
+) -> Result<()> {
+    let library_root = applies[0].library_root.clone();
+    let library_name = applies[0].library_name.clone();
+    let library_url = applies[0].library_url.clone();
+
+    let host = crate::review::detect_host(
+        &crate::host::parse_remote_url(&library_url)
+            .map_err(|e| AppError::Config(e.to_string()))?
+            .host,
+    );
+
+    // The skills' display names (fork ops use the new name) drive the branch
+    // slug, title, and body.
+    let names: Vec<String> = applies
+        .iter()
+        .map(|a| match &a.op {
+            ApplyOp::Fork { new_name, .. } => new_name.clone(),
+            ApplyOp::Update => project_cfg.installed[a.candidate_index].name.clone(),
+        })
+        .collect();
+    let branch = pr_branch_name(&names);
+    let auto_title = pr_title(&names);
+    let mut title = args.pr_title.clone().unwrap_or(auto_title);
+    let body = args
+        .message
+        .clone()
+        .unwrap_or_else(|| format!("Opened by skillctl.\n\nSkills: {}", names.join(", ")));
+
+    // Confirm before any branch/push when interactive. Title is editable.
+    if ctx.interactive && !args.yes {
+        title = input("PR/MR title")
+            .default_input(&title)
+            .interact()
+            .unwrap_or(title);
+        let proceed = confirm(format!(
+            "Open a PR/MR to `{library_name}` (branch `{branch}` → {} skill(s))?",
+            names.len()
+        ))
+        .interact()?;
+        if !proceed {
+            ui::log_info(ctx, format!("skipped PR/MR to `{library_name}`"))?;
+            for name in &names {
+                results.push(
+                    json!({"name": name, "status": "skipped", "reason": "PR/MR not confirmed"}),
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    let base = git::current_branch(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
+    git::create_branch(&library_root, &branch).map_err(|e| AppError::Git(e.to_string()))?;
+
+    // Apply each skill's content onto the branch (continue-on-error).
+    let mut applied_any = false;
+    for apply in &applies {
+        let installed = &project_cfg.installed[apply.candidate_index];
+        let installed_name = installed.name.clone();
+        let local_dir = safe_join(cwd, &installed.destination)?;
+        let (library_dir, library_relative) = match &apply.op {
+            ApplyOp::Update => (
+                safe_join(&library_root, &installed.source_path)?,
+                installed.source_path.clone(),
+            ),
+            ApplyOp::Fork {
+                new_library_path, ..
+            } => (
+                safe_join(&library_root, new_library_path)?,
+                new_library_path.clone(),
+            ),
+        };
+        let outcome: Result<()> = (|| {
+            fs_util::replace_folder_contents(&local_dir, &library_dir)?;
+            git::add_all(&library_root, &library_relative)
+                .map_err(|e| AppError::Git(e.to_string()))?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => applied_any = true,
+            Err(e) => {
+                let _ =
+                    ui::log_warning(ctx, format!("PR apply failed for `{installed_name}`: {e}"));
+                let _ = git::checkout_paths(&library_root, &library_relative);
+                results.push(
+                    json!({"name": installed_name, "status": "failed", "reason": e.to_string()}),
+                );
+            }
+        }
+    }
+
+    // Always return the cache to its base branch on the way out (success or
+    // not), so the next command sees a clean default branch.
+    let restore_base = |ctx: &Context| {
+        if let Err(e) = git::checkout_branch(&library_root, &base) {
+            let _ = ui::log_warning(
+                ctx,
+                format!("could not return `{library_name}` cache to `{base}`: {e}"),
+            );
+        }
+    };
+
+    if !applied_any
+        || !git::has_staged_changes(&library_root).map_err(|e| AppError::Git(e.to_string()))?
+    {
+        ui::log_info(
+            ctx,
+            format!("no effective changes for `{library_name}`; no PR/MR opened"),
+        )?;
+        restore_base(ctx);
+        return Ok(());
+    }
+
+    if let Err(e) = git::commit(&library_root, &title) {
+        restore_base(ctx);
+        return Err(AppError::Git(e.to_string()).into());
+    }
+    if let Err(e) = git::push_branch(&library_root, &branch) {
+        restore_base(ctx);
+        return Err(AppError::Git(e.to_string()).into());
+    }
+
+    let url = match crate::review::open_review_request(
+        &host,
+        &library_root,
+        &branch,
+        &base,
+        &title,
+        &body,
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            // The branch is pushed; only the request failed. Don't lose that.
+            ui::log_warning(
+                ctx,
+                format!(
+                    "branch `{branch}` pushed to `{library_name}`, but opening the PR/MR failed: {e}"
+                ),
+            )?;
+            restore_base(ctx);
+            return Err(e.into());
+        }
+    };
+    restore_base(ctx);
+
+    ui::log_success(ctx, format!("PR/MR opened for `{library_name}`: {url}"))?;
+    for name in &names {
+        results.push(json!({
+            "name": name,
+            "status": "pr_opened",
+            "operation": "pr",
+            "branch": branch,
+            "pr_url": url,
+        }));
+    }
+    Ok(())
+}
+
+/// Branch name for a PR/MR run: `skillctl/<slug>`, where the slug joins the
+/// skill names, sanitised to a git-ref-safe charset and length-capped.
+fn pr_branch_name(names: &[String]) -> String {
+    let joined = names.join("-");
+    let mut slug: String = joined
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    slug.truncate(40);
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "skillctl/update".to_string()
+    } else {
+        format!("skillctl/{slug}")
+    }
+}
+
+fn pr_title(names: &[String]) -> String {
+    match names {
+        [one] => format!("Update skill `{one}`"),
+        many => format!("Update {} skills: {}", many.len(), many.join(", ")),
+    }
+}
+
 fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
     if !ctx.json {
         return;
     }
     let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
     let forked = results.iter().filter(|r| r["status"] == "forked").count();
+    let pr_opened = results
+        .iter()
+        .filter(|r| r["status"] == "pr_opened")
+        .count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
     let commit_value = commit.map(|(sha, message)| json!({"sha": sha, "message": message}));
     let out = json!({
@@ -746,6 +973,7 @@ fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
         "summary": {
             "pushed": pushed,
             "forked": forked,
+            "pr_opened": pr_opened,
             "skipped": skipped,
         },
     });

@@ -11,6 +11,7 @@ mod lock;
 mod path_safety;
 mod project_config;
 mod prompt;
+mod review;
 mod sanitize;
 mod skill;
 mod ui;
