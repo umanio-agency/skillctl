@@ -104,12 +104,13 @@ Under `--json`, a single-library list emits `{ "command": "list", "library": <ur
 skillctl add --skill <name> [--skill <name> …] --dest <path>
 skillctl add --all --dest <path>
 skillctl add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
-skillctl add --from <name> --skill <name> --dest <path>   # install from another library
+skillctl add --from <name> --skill <name> --dest <path>   # install from one named library
+skillctl add --from all --tag <tag> --dest <path>         # install matching skills from every library
 ```
 
 | Flag | Purpose | Required in non-interactive |
 |---|---|---|
-| `--from <name>` | Install from a named library instead of the default. `--from all` is **not** valid on `add` (pick one library); use `skillctl list --from all` to browse. Installing from a non-default library forces the content audit on (see below). | No |
+| `--from <name>` | Install from a named library instead of the default. `--from all` installs matching skills from **every** configured library in one run (requires a selection — `--all`/`--skill`/`--tag`; interactive cross-library browsing is not available yet). Installing from any non-default library forces the content audit on (see below). | No |
 | `--skill <name>` | Install a specific skill (repeatable). Mutually exclusive with `--all` and `--tag`. | Yes, unless `--all` or `--tag` |
 | `--all` | Install every skill in the library. Mutually exclusive with `--skill` and `--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Install every skill carrying this tag (repeatable). Default semantics is union (any of the given tags). Mutually exclusive with `--skill` and `--all`. | Yes, unless `--skill` or `--all` |
@@ -121,7 +122,9 @@ skillctl add --from <name> --skill <name> --dest <path>   # install from another
 
 Before anything is copied, `add` runs a content security audit (see `skillctl audit`) on each selected skill. By default it is **warn-only** (findings are logged, the install proceeds); under `--json` each installed skill's result carries an `"audit_verdict"` field (`safe`/`caution`/`warning`/`dangerous`) so a non-interactive caller still sees the signal. Pass `--fail-on <severity>` to block, or `--no-audit` to skip the scan entirely.
 
-When installing from a **non-default library** (`--from <name>` where `<name>` isn't the default), the content is untrusted third-party material, so the audit is **mandatory**: `--no-audit` is refused (exit 2). It is still warn-only unless you add `--fail-on`. Installs from the default library are unaffected.
+When installing from a **non-default library** (`--from <name>` where `<name>` isn't the default, or `--from all` while any non-default library is configured), the content is untrusted third-party material, so the audit is **mandatory**: `--no-audit` is refused (exit 2). It is still warn-only unless you add `--fail-on`. Installs from the default library are unaffected.
+
+With `--from all`, the default library is installed first and keeps the skill's bare name; if another library offers a skill whose name (or destination folder) is already taken, that install is suffixed `-<library>` (e.g. `deploy` from `personal` + `deploy-team` from `team`), so both land with distinct names, folders, and provenance. The JSON `results[]` entries carry a `library` field naming the source.
 
 Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, an RFC3339 timestamp, and the provenance (`library` name + `library_url`) it was installed from.
 
