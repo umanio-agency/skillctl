@@ -119,6 +119,135 @@ impl<T: Clone> FilterMultiSelect<T> {
     }
 }
 
+/// Multi-select with a row of switchable **library tabs**, layered on the same
+/// live filter as [`FilterMultiSelect`]. Each tab carries its own item list;
+/// selection accumulates per tab so one run yields picks across several
+/// libraries. Items for every tab are supplied up front (eager discovery
+/// happens before the prompt opens — no git work runs inside raw mode).
+///
+/// Extra key bindings over the single-list prompt:
+/// - ← / →  — switch the active library tab (filter + focus reset for the tab)
+pub struct TabbedMultiSelect<T: Clone> {
+    title: String,
+    tabs: Vec<TabData<T>>,
+    required: bool,
+}
+
+struct TabData<T> {
+    label: String,
+    items: Vec<PromptItem<T>>,
+}
+
+pub fn tabbed<T: Clone>(title: impl Into<String>) -> TabbedMultiSelect<T> {
+    TabbedMultiSelect {
+        title: title.into(),
+        tabs: Vec::new(),
+        required: false,
+    }
+}
+
+impl<T: Clone> TabbedMultiSelect<T> {
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Append a tab and its items as `(value, label, hint)` triples.
+    pub fn tab(mut self, label: impl Into<String>, items: Vec<(T, String, String)>) -> Self {
+        self.tabs.push(TabData {
+            label: label.into(),
+            items: items
+                .into_iter()
+                .map(|(value, label, hint)| PromptItem { value, label, hint })
+                .collect(),
+        });
+        self
+    }
+
+    pub fn interact(self) -> Result<Vec<T>> {
+        if self.tabs.iter().all(|t| t.items.is_empty()) {
+            return Ok(Vec::new());
+        }
+
+        let mut state = TabState {
+            title: self.title,
+            tabs: self.tabs,
+            required: self.required,
+            active: 0,
+            query: String::new(),
+            focus: 0,
+            selected: HashSet::new(),
+            visible: Vec::new(),
+            last_lines: 0,
+        };
+        state.refilter();
+
+        let mut out = stdout();
+        enable_raw_mode().context("enabling terminal raw mode")?;
+        execute!(out, Hide, DisableLineWrap).context("preparing terminal")?;
+
+        let outcome = run_tab_event_loop(&mut state, &mut out);
+
+        let _ = execute!(out, Show, EnableLineWrap, ResetColor);
+        let _ = disable_raw_mode();
+
+        match outcome {
+            Ok(()) => {
+                clear_render(&mut out, state.last_lines)?;
+                render_tab_final(&mut out, &state)?;
+                let mut picks = Vec::new();
+                for (t, tab) in state.tabs.iter().enumerate() {
+                    for (i, item) in tab.items.iter().enumerate() {
+                        if state.selected.contains(&(t, i)) {
+                            picks.push(item.value.clone());
+                        }
+                    }
+                }
+                Ok(picks)
+            }
+            Err(LoopError::Cancelled) => {
+                clear_render(&mut out, state.last_lines)?;
+                render_cancel(&mut out, &state.title)?;
+                Err(anyhow!("cancelled"))
+            }
+            Err(LoopError::Other(e)) => Err(e),
+        }
+    }
+}
+
+struct TabState<T> {
+    title: String,
+    tabs: Vec<TabData<T>>,
+    required: bool,
+    active: usize,
+    query: String,
+    focus: usize,
+    selected: HashSet<(usize, usize)>,
+    visible: Vec<usize>,
+    last_lines: u16,
+}
+
+impl<T> TabState<T> {
+    fn refilter(&mut self) {
+        self.visible = filter_indices(&self.query, &self.tabs[self.active].items);
+        if self.focus >= self.visible.len() {
+            self.focus = self.visible.len().saturating_sub(1);
+        }
+    }
+
+    fn switch_to(&mut self, tab: usize) {
+        if tab != self.active && tab < self.tabs.len() {
+            self.active = tab;
+            self.focus = 0;
+            self.refilter();
+        }
+    }
+
+    fn selected_in(&self, tab: usize) -> usize {
+        self.selected.iter().filter(|(t, _)| *t == tab).count()
+    }
+}
+
 struct State<T> {
     title: String,
     items: Vec<PromptItem<T>>,
@@ -231,6 +360,323 @@ fn run_event_loop<T: Clone>(
             _ => {}
         }
     }
+}
+
+fn run_tab_event_loop<T: Clone>(
+    state: &mut TabState<T>,
+    out: &mut Stdout,
+) -> std::result::Result<(), LoopError> {
+    loop {
+        clear_render(out, state.last_lines).map_err(LoopError::from)?;
+        let lines = render_tabbed(out, state).map_err(LoopError::from)?;
+        state.last_lines = lines;
+        out.flush()
+            .context("flushing terminal")
+            .map_err(LoopError::from)?;
+
+        match event::read()
+            .context("reading terminal event")
+            .map_err(LoopError::from)?
+        {
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            }) => {
+                if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+                    return Err(LoopError::Cancelled);
+                }
+                match code {
+                    KeyCode::Esc => return Err(LoopError::Cancelled),
+                    KeyCode::Enter => {
+                        if state.required && state.selected.is_empty() {
+                            continue;
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Left if state.active > 0 => state.switch_to(state.active - 1),
+                    KeyCode::Right if state.active + 1 < state.tabs.len() => {
+                        state.switch_to(state.active + 1)
+                    }
+                    KeyCode::Up if state.focus > 0 => state.focus -= 1,
+                    KeyCode::Down if state.focus + 1 < state.visible.len() => state.focus += 1,
+                    KeyCode::Tab | KeyCode::Char(' ') => {
+                        if let Some(&idx) = state.visible.get(state.focus) {
+                            let key = (state.active, idx);
+                            if state.selected.contains(&key) {
+                                state.selected.remove(&key);
+                            } else {
+                                state.selected.insert(key);
+                            }
+                        }
+                    }
+                    KeyCode::Backspace if !state.query.is_empty() => {
+                        state.query.pop();
+                        state.refilter();
+                    }
+                    KeyCode::Char(c) if !c.is_control() => {
+                        state.query.push(c);
+                        state.refilter();
+                    }
+                    _ => {}
+                }
+            }
+            Event::Resize(_, _) => {}
+            _ => {}
+        }
+    }
+}
+
+fn queue_tab_row<T>(out: &mut Stdout, state: &TabState<T>, max: usize) -> Result<()> {
+    let mut width = 0usize;
+    for (i, tab) in state.tabs.iter().enumerate() {
+        let count = state.selected_in(i);
+        let base = if count > 0 {
+            format!("{}({count})", tab.label)
+        } else {
+            tab.label.clone()
+        };
+        let shown = if i == state.active {
+            format!("[{base}]")
+        } else {
+            base
+        };
+        let sep = if i > 0 { 2 } else { 0 };
+        let w = sep + shown.chars().count();
+        if width + w > max {
+            queue!(out, SetForegroundColor(COLOR_DIM), Print(" …"), ResetColor)?;
+            break;
+        }
+        if i > 0 {
+            queue!(out, Print("  "))?;
+        }
+        let color = if i == state.active {
+            COLOR_ACCENT
+        } else {
+            COLOR_DIM
+        };
+        queue!(out, SetForegroundColor(color), Print(&shown), ResetColor)?;
+        width += w;
+    }
+    Ok(())
+}
+
+fn render_tabbed<T>(out: &mut Stdout, state: &TabState<T>) -> Result<u16> {
+    let cols = terminal_size().map(|(c, _)| c as usize).unwrap_or(80);
+    let mut lines: u16 = 0;
+
+    // Header
+    queue!(
+        out,
+        SetForegroundColor(COLOR_ACCENT),
+        Print(MARK_ACTIVE),
+        ResetColor,
+        Print("  "),
+        Print(&state.title),
+        Print("\r\n")
+    )?;
+    lines += 1;
+
+    // Tab row
+    queue!(
+        out,
+        SetForegroundColor(COLOR_DIM),
+        Print(MARK_BAR),
+        ResetColor,
+        Print("  ")
+    )?;
+    queue_tab_row(out, state, cols.saturating_sub(3).max(10))?;
+    queue!(out, Print("\r\n"))?;
+    lines += 1;
+
+    // Search bar
+    queue!(
+        out,
+        SetForegroundColor(COLOR_DIM),
+        Print(MARK_BAR),
+        ResetColor,
+        Print("  "),
+    )?;
+    if state.query.is_empty() {
+        queue!(
+            out,
+            SetForegroundColor(COLOR_DIM),
+            Print("type to filter…"),
+            ResetColor
+        )?;
+    } else {
+        queue!(out, Print(&state.query))?;
+    }
+    queue!(out, Print("\r\n"))?;
+    lines += 1;
+
+    let items = &state.tabs[state.active].items;
+    if state.visible.is_empty() {
+        let msg = if items.is_empty() {
+            "  (no skills in this library)"
+        } else {
+            "  no matches"
+        };
+        queue!(
+            out,
+            SetForegroundColor(COLOR_DIM),
+            Print(MARK_BAR),
+            Print(msg),
+            ResetColor,
+            Print("\r\n")
+        )?;
+        lines += 1;
+    } else {
+        let (start, end) = window_bounds(state.visible.len(), state.focus, WINDOW_SIZE);
+        if start > 0 {
+            queue!(
+                out,
+                SetForegroundColor(COLOR_DIM),
+                Print(MARK_BAR),
+                Print(format!("  ↑ {start} more above")),
+                ResetColor,
+                Print("\r\n")
+            )?;
+            lines += 1;
+        }
+        for idx_in_visible in start..end {
+            let item_idx = state.visible[idx_in_visible];
+            let is_focused = idx_in_visible == state.focus;
+            let is_selected = state.selected.contains(&(state.active, item_idx));
+            let item = &items[item_idx];
+
+            queue!(
+                out,
+                SetForegroundColor(COLOR_DIM),
+                Print(MARK_BAR),
+                ResetColor,
+                Print("  ")
+            )?;
+            if is_focused {
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_ACCENT),
+                    Print(MARK_FOCUS),
+                    ResetColor,
+                    Print(" ")
+                )?;
+            } else {
+                queue!(out, Print("  "))?;
+            }
+            if is_selected {
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_SELECTED),
+                    Print(MARK_SELECTED),
+                    ResetColor
+                )?;
+            } else {
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_DIM),
+                    Print(MARK_UNSELECTED),
+                    ResetColor
+                )?;
+            }
+            queue!(out, Print(" "))?;
+
+            let prefix_width = 6;
+            let max_label_and_hint = cols.saturating_sub(prefix_width).max(20);
+            let hint_part = if !item.hint.is_empty() {
+                format!("  {}", item.hint)
+            } else {
+                String::new()
+            };
+            let combined = format!("{}{}", item.label, hint_part);
+            let truncated = truncate_to(&combined, max_label_and_hint);
+            if !item.hint.is_empty() && truncated.len() == combined.len() {
+                queue!(out, Print(&item.label))?;
+                queue!(
+                    out,
+                    SetForegroundColor(COLOR_DIM),
+                    Print("  "),
+                    Print(&item.hint),
+                    ResetColor
+                )?;
+            } else {
+                queue!(out, Print(truncated))?;
+            }
+            queue!(out, Print("\r\n"))?;
+            lines += 1;
+        }
+        if end < state.visible.len() {
+            queue!(
+                out,
+                SetForegroundColor(COLOR_DIM),
+                Print(MARK_BAR),
+                Print(format!("  ↓ {} more below", state.visible.len() - end)),
+                ResetColor,
+                Print("\r\n")
+            )?;
+            lines += 1;
+        }
+    }
+
+    let footer = format!(
+        "{} selected • ← → library • space toggle • enter confirm • esc cancel",
+        state.selected.len()
+    );
+    let footer = truncate_to(&footer, cols.saturating_sub(3).max(10));
+    queue!(
+        out,
+        SetForegroundColor(COLOR_DIM),
+        Print(MARK_END),
+        Print("  "),
+        Print(footer),
+        ResetColor,
+        Print("\r\n")
+    )?;
+    lines += 1;
+
+    Ok(lines)
+}
+
+fn render_tab_final<T>(out: &mut Stdout, state: &TabState<T>) -> Result<()> {
+    let mut groups: Vec<String> = Vec::new();
+    for (t, tab) in state.tabs.iter().enumerate() {
+        let names: Vec<&str> = tab
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| state.selected.contains(&(t, *i)))
+            .map(|(_, item)| item.label.as_str())
+            .collect();
+        if !names.is_empty() {
+            groups.push(format!("{}: {}", tab.label, names.join(", ")));
+        }
+    }
+    let body = if groups.is_empty() {
+        "(none)".to_string()
+    } else {
+        groups.join("  •  ")
+    };
+    queue!(
+        out,
+        SetForegroundColor(COLOR_ACCENT),
+        Print(MARK_ACTIVE),
+        ResetColor,
+        Print("  "),
+        Print(&state.title),
+        Print("\r\n"),
+        SetForegroundColor(COLOR_DIM),
+        Print(MARK_BAR),
+        ResetColor,
+        Print("  "),
+        Print(body),
+        Print("\r\n"),
+        SetForegroundColor(COLOR_DIM),
+        Print(MARK_BAR),
+        ResetColor,
+        Print("\r\n")
+    )?;
+    out.flush()?;
+    Ok(())
 }
 
 fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
@@ -554,5 +1000,63 @@ mod tests {
     #[test]
     fn truncate_long_with_ellipsis() {
         assert_eq!(truncate_to("abcdefghij", 5), "abcd…");
+    }
+
+    fn tab_state() -> TabState<()> {
+        TabState {
+            title: "t".to_string(),
+            tabs: vec![
+                TabData {
+                    label: "a".to_string(),
+                    items: vec![item("foo"), item("bar")],
+                },
+                TabData {
+                    label: "b".to_string(),
+                    items: vec![item("baz")],
+                },
+            ],
+            required: false,
+            active: 0,
+            query: String::new(),
+            focus: 1,
+            selected: HashSet::new(),
+            visible: Vec::new(),
+            last_lines: 0,
+        }
+    }
+
+    #[test]
+    fn tab_switch_resets_focus_and_refilters() {
+        let mut s = tab_state();
+        s.refilter();
+        assert_eq!(s.visible, vec![0, 1]);
+        s.switch_to(1);
+        assert_eq!(s.active, 1);
+        assert_eq!(s.focus, 0);
+        assert_eq!(s.visible, vec![0], "tab b has a single item");
+    }
+
+    #[test]
+    fn tab_filter_applies_to_active_tab_only() {
+        let mut s = tab_state();
+        s.query = "ba".to_string();
+        s.refilter();
+        assert_eq!(s.visible, vec![1], "only `bar` matches in tab a");
+        s.switch_to(1);
+        assert_eq!(
+            s.visible,
+            vec![0],
+            "`baz` matches in tab b under the same query"
+        );
+    }
+
+    #[test]
+    fn selected_count_is_per_tab() {
+        let mut s = tab_state();
+        s.selected.insert((0, 0));
+        s.selected.insert((0, 1));
+        s.selected.insert((1, 0));
+        assert_eq!(s.selected_in(0), 2);
+        assert_eq!(s.selected_in(1), 1);
     }
 }

@@ -32,16 +32,16 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl detect")?;
 
     let cfg = config::load()?;
-    let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
-    })?;
+    let library = resolve_detect_library(&args, ctx, &cfg)?;
 
     let library_root =
         config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skillctl init{}` again",
+            "cache for library `{}` not found at {} — run `skillctl library add {} {}` to clone it",
+            library.name,
             fs_util::display_path(&library_root),
+            library.name,
             library.url
         ))
         .into());
@@ -196,6 +196,8 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
             source_sha: new_sha.clone(),
             destination: local_destination.clone(),
             installed_at: installed_at.clone(),
+            library: Some(library.name.clone()),
+            library_url: Some(library.url.clone()),
         });
         ui::log_success(ctx, format!("{} → {}", skill.name, lib_relative.display()))?;
         results.push(json!({
@@ -258,6 +260,56 @@ fn emit_json(
 /// normalise the JSON output.
 fn is_root(p: &Path) -> bool {
     p.as_os_str().is_empty() || p == Path::new(".")
+}
+
+/// Pick the writable library to add the detected skills to. `--to <name>`
+/// targets it explicitly (refused if read-only; PR/MR libraries deferred);
+/// otherwise the sole `write` library is used, or — when several exist — the
+/// user Selects (interactive) or must pass `--to` (non-interactive).
+fn resolve_detect_library(
+    args: &DetectArgs,
+    ctx: &Context,
+    cfg: &config::Config,
+) -> Result<config::Library> {
+    if let Some(name) = &args.to {
+        let lib = cfg.resolve_write(Some(name))?;
+        if lib.access == config::Access::Pr {
+            return Err(AppError::Config(format!(
+                "library `{}` uses PR/MR review (access = pr); adding through the branch + PR/MR flow arrives in the next release",
+                lib.name
+            ))
+            .into());
+        }
+        return Ok(lib.clone());
+    }
+    let writers = cfg.write_targets();
+    match writers.as_slice() {
+        [] => Err(AppError::Config(
+            "no writable library configured — add one with `skillctl library add <name> <url> --access write`, or grant an existing library write access"
+                .into(),
+        )
+        .into()),
+        [only] => Ok((*only).clone()),
+        many => {
+            if !ctx.interactive {
+                let names: Vec<&str> = many.iter().map(|l| l.name.as_str()).collect();
+                return Err(AppError::Config(format!(
+                    "several writable libraries configured ({}) — pass `--to <name>` to choose where to add",
+                    names.join(", ")
+                ))
+                .into());
+            }
+            let mut prompt = select("Add the new skills to which library?");
+            for l in many {
+                let hint = if l.default { "default" } else { l.access.as_str() };
+                prompt = prompt.item(l.name.clone(), &l.name, hint);
+            }
+            let chosen: String = prompt.interact()?;
+            cfg.by_name(&chosen)
+                .cloned()
+                .ok_or_else(|| AppError::Config(format!("no library named `{chosen}`")).into())
+        }
+    }
 }
 
 fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> Result<Vec<Skill>> {

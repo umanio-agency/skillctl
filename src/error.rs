@@ -10,12 +10,14 @@ pub enum AppError {
     Config(String),
     Conflict(String),
     Git(String),
+    /// A content-audit threshold (`--fail-on`) was exceeded.
+    Audit(String),
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Config(s) | Self::Conflict(s) | Self::Git(s) => f.write_str(s),
+            Self::Config(s) | Self::Conflict(s) | Self::Git(s) | Self::Audit(s) => f.write_str(s),
         }
     }
 }
@@ -28,6 +30,7 @@ impl AppError {
             Self::Config(_) => ExitCode::Config,
             Self::Conflict(_) => ExitCode::Conflict,
             Self::Git(_) => ExitCode::Git,
+            Self::Audit(_) => ExitCode::Audit,
         }
     }
 }
@@ -40,6 +43,8 @@ pub enum ExitCode {
     Config = 2,
     Conflict = 3,
     Git = 4,
+    /// A content-audit threshold was exceeded (`--fail-on`).
+    Audit = 5,
 }
 
 impl From<ExitCode> for std::process::ExitCode {

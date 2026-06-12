@@ -33,7 +33,7 @@ Per-command top-level shape:
 {"command":"add","destination":"…|null","results":[{"name":"…","status":"installed|skipped|aborted","…":"…"}],"summary":{"installed":N,"skipped":N,"aborted":N}}
 
 // push
-{"command":"push","results":[{"name":"…","status":"pushed|forked|skipped","operation":"update|fork","…":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"pushed":N,"forked":N,"skipped":N}}
+{"command":"push","results":[{"name":"…","status":"pushed|forked|promoted|pr_opened|skipped","operation":"update|fork|pr","pr_url":"…","branch":"…","new_name":"…","library":"…","…":"…"}],"commit":{"sha":"…","message":"…"}|null,"summary":{"pushed":N,"forked":N,"promoted":N,"pr_opened":N,"skipped":N}}
 
 // pull
 {"command":"pull","results":[{"name":"…","status":"pulled|skipped","fork_local":"…|null","fork_local_path":"…","source_sha":"…"}],"summary":{"pulled":N,"forked_locally":N,"skipped":N}}
@@ -58,9 +58,27 @@ skillctl init https://github.com/<owner>/<repo>
 ```
 
 - Clones the library repo into a platform-appropriate cache.
-- Persists the URL in a global config file.
-- Re-running `init` against the same URL refreshes the cache; against a different URL replaces the cached library.
-- Only GitHub URLs (HTTPS or SSH) are supported in v1.
+- Persists the URL in a global config file as the **default library** (named `personal`, access `write`).
+- Re-running `init` against the same URL refreshes the cache; against a different URL re-points the default library.
+- Any git host works — GitHub, GitLab, or self-hosted — over HTTPS or SSH (e.g. `git@host:owner/repo.git`). Cleartext `http://` is refused.
+
+## Multiple libraries
+
+skillctl can track more than one library. A **library** carries an access level — `read` (consume only), `write` (direct commit), or `pr` (branch + PR/MR) — and exactly one is the **default**. The personal library from `init` is just the default.
+
+```sh
+skillctl library add <name> <url> [--access read|write|pr] [--default]
+skillctl library list
+skillctl library remove <name>
+skillctl library set-default <name>
+```
+
+- `library add` clones the repo immediately (fail-fast on a bad URL/credentials). Added libraries default to `--access read` so you can't push to them by accident. The name `all` is reserved.
+- The default library is what every command acts on when you don't say otherwise. `--from <name>` (on `list`/`add`) reads from another library; non-default reads are treated as **untrusted third-party content** (see the audit notes below).
+- `pull` and `push` both **follow each skill's provenance** — a skill installed from any configured library is refreshed from / written back to that library (a run may touch several). A skill whose recorded provenance is no longer configured is listed and skipped (run `skillctl library add` to restore it).
+- `push` to a `write`-access library commits directly; to a `pr`-access library it pushes a `skillctl/<slug>` branch and opens a PR (`gh`) or MR (`glab`), returning the URL. A skill from a `read`-access source can't be written back — **promote it** into a writable library with `push --to <lib>` (see the push section). Opening a PR/MR uses your existing `gh`/`glab` auth — no token is stored; unsupported hosts get a "push done, open it manually" message.
+- Each repository may be configured at most once: `skillctl library add` refuses a URL that resolves to an already-configured repo (same repo under two access levels would make a skill's write target depend on config order).
+- **Interactive only:** running `skillctl add` in a terminal with more than one library configured (or `skillctl add --from all`) opens a picker with a **tab per library** (←/→ to switch, opens on the default); selections accumulate across tabs into one install. Agents/non-interactive runs use the flags above instead.
 
 ## Commands
 
@@ -68,6 +86,8 @@ skillctl init https://github.com/<owner>/<repo>
 
 ```sh
 skillctl list
+skillctl list --from <name>          # list a specific library
+skillctl list --from all             # list every configured library
 skillctl list --tag <tag> [--tag <tag> …] [--all-tags]
 ```
 
@@ -75,8 +95,11 @@ Refreshes the library cache (best-effort `git fetch`) and prints every skill wit
 
 | Flag | Purpose |
 |---|---|
+| `--from <name>` | List a named library instead of the default. `--from all` spans every configured library, grouped by library (each section shows the library name, access, and URL). |
 | `--tag <tag>` | Filter to skills carrying this tag. Repeatable; default semantics is union (any of the given tags). |
 | `--all-tags` | Switch to intersection (skill must carry every requested tag). Requires `--tag`. |
+
+Under `--json`, a single-library list emits `{ "command": "list", "library": <url>, "skills": [...] }`; `--from all` emits `{ "command": "list", "from": "all", "libraries": [ { "name", "url", "access", "default", "skills": [...] } ] }`.
 
 ### `skillctl add` — install skills from the library into a project
 
@@ -84,18 +107,29 @@ Refreshes the library cache (best-effort `git fetch`) and prints every skill wit
 skillctl add --skill <name> [--skill <name> …] --dest <path>
 skillctl add --all --dest <path>
 skillctl add --tag <tag> [--tag <tag> …] [--all-tags] --dest <path>
+skillctl add --from <name> --skill <name> --dest <path>   # install from one named library
+skillctl add --from all --tag <tag> --dest <path>         # install matching skills from every library
 ```
 
 | Flag | Purpose | Required in non-interactive |
 |---|---|---|
+| `--from <name>` | Install from a named library instead of the default. `--from all` installs matching skills from **every** configured library in one run (non-interactive: requires a selection — `--all`/`--skill`/`--tag`). Installing from any non-default library forces the content audit on (see below). | No |
 | `--skill <name>` | Install a specific skill (repeatable). Mutually exclusive with `--all` and `--tag`. | Yes, unless `--all` or `--tag` |
 | `--all` | Install every skill in the library. Mutually exclusive with `--skill` and `--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Install every skill carrying this tag (repeatable). Default semantics is union (any of the given tags). Mutually exclusive with `--skill` and `--all`. | Yes, unless `--skill` or `--all` |
 | `--all-tags` | Switch tag matching from union to intersection (skill must carry every requested tag). Requires `--tag`. | No |
 | `--dest <path>` | Project-relative destination folder (e.g. `.claude/skills`). The folder is created if missing. | **Yes** |
 | `--on-conflict <overwrite\|skip\|abort>` | Strategy when a destination skill folder already exists. | Yes if any conflict is encountered |
+| `--no-audit` | Skip the content security audit of skills before installing. | No |
+| `--fail-on <info\|warning\|critical>` | Refuse the **whole batch** (install nothing, exit 5) if any selected skill's content audit reaches this severity. Without it the audit is warn-only. | No |
 
-Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, and an RFC3339 timestamp.
+Before anything is copied, `add` runs a content security audit (see `skillctl audit`) on each selected skill. By default it is **warn-only** (findings are logged, the install proceeds); under `--json` each installed skill's result carries an `"audit_verdict"` field (`safe`/`caution`/`warning`/`dangerous`) so a non-interactive caller still sees the signal. Pass `--fail-on <severity>` to block, or `--no-audit` to skip the scan entirely.
+
+When installing from a **non-default library** (`--from <name>` where `<name>` isn't the default, or `--from all` while any non-default library is configured), the content is untrusted third-party material, so the audit is **mandatory**: `--no-audit` is refused (exit 2). It is still warn-only unless you add `--fail-on`. Installs from the default library are unaffected.
+
+With `--from all`, the default library is installed first and keeps the skill's bare name; if another library offers a skill whose name (or destination folder) is already taken, that install is suffixed `-<library>` (e.g. `deploy` from `personal` + `deploy-team` from `team`), so both land with distinct names, folders, and provenance. The JSON `results[]` entries carry a `library` field naming the source.
+
+Each installed skill is recorded in `.skills.toml` at the project root with the source path inside the library, the library commit SHA at install time, the local destination, an RFC3339 timestamp, and the provenance (`library` name + `library_url`) it was installed from.
 
 Tags are read from the `SKILL.md` frontmatter. Both inline and block forms work:
 
@@ -142,15 +176,24 @@ skillctl push --tag <tag> [--tag <tag> …] [--all-tags]
 
 | Flag | Purpose |
 |---|---|
+| `--to <name>` | **Promotion mode.** Publish the selected skills into this writable library (rewriting their provenance) instead of pushing each back to its own. Use it to contribute a skill installed from a `read`-only source into your own/team library. On a path collision in the target, `--on-divergence` applies. |
 | `--skill <name>` | Push only specific skills by name (repeatable). Mutually exclusive with `--all`/`--tag`. |
 | `--all` | Push every skill that has pushable changes. Mutually exclusive with `--skill`/`--tag`. |
 | `--tag <tag>` | Push every pushable skill whose **local** SKILL.md carries this tag. Repeatable; default semantics is union (any of). Mutually exclusive with `--skill`/`--all`. |
 | `--all-tags` | Switch tag matching to intersection (skill must carry every requested tag). Requires `--tag`. |
 | `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent (and library-missing) skills. Default when omitted: skip with a warning. |
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New name = `<original>-<suffix>`. |
-| `--message <text>` | Override the auto-generated commit message. |
+| `--message <text>` | Override the auto-generated commit message. For a `pr`-access library it is also the PR/MR description. |
+| `--pr-title <title>` | Title for the PR/MR opened against a `pr`-access library (default: auto-generated). Ignored for `write` libraries. |
+| `--yes` | Skip the interactive PR/MR confirmation (open it without prompting). Always implied in non-interactive mode. |
 
-For each pushable skill, `skillctl push` runs a content diff (via git blob hashes), applies the chosen strategy, then commits **once** for the whole run and pushes to the library remote. The `source_sha` of every successfully pushed entry in `.skills.toml` is rewritten to the new HEAD.
+For each pushable skill, `skillctl push` runs a content diff (via git blob hashes) and applies the chosen strategy. `push` **follows provenance**: each skill is written back to the library it was installed from.
+- For a `write` library: commits and pushes to its default branch, **one commit per library** (a run touching several makes several commits); each pushed `.skills.toml` entry's `source_sha` is rewritten to that library's new HEAD. In `--json`, `commit` is the single commit when exactly one `write` library was pushed, otherwise `null` (each result carries its `source_sha`).
+- For a `pr` library: pushes a `skillctl/<slug>` branch and opens a PR (`gh`) / MR (`glab`); the result carries `"status":"pr_opened"`, `"pr_url"`, and `"branch"`, and the URL is shown in the outro. `.skills.toml` is **not** changed (the skill isn't merged yet). Interactive runs show an editable title + confirm; `--yes`/non-interactive open it directly.
+
+Skills from `read` libraries, and skills whose provenance is no longer configured, are listed and skipped (see the access notes above).
+
+**Promotion** (`push --to <writable-library>`): publishes the selected skills' local content into `<library>` (regardless of where they came from) and rewrites their `.skills.toml` provenance to it — the way to contribute a skill installed from a read-only source. Each skill lands at its current `source_path` in the target; if that path is already taken there, the `--on-divergence` policy decides — `overwrite` (replace the target's version), `fork` (add as a new skill under `<name>-<--fork-suffix>`, renaming the local folder), or `skip` (default non-interactively; interactive shows a three-way prompt). The target must be `write`-access (`read` is refused; `pr` promotion isn't supported yet). JSON results carry `"status":"promoted"` (+ `"new_name"` when forked).
 
 **Fork** (creating a new library skill from local edits) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: every divergent (or library-missing) skill is forked under the name `<original>-<suffix>`.
 
@@ -171,7 +214,7 @@ skillctl pull --tag <tag> [--tag <tag> …] [--all-tags]
 | `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent skills. `fork` here means **fork-locally** (rename the local copy under a new name, then pull the library version into the original destination). Default when omitted: skip. |
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New local name = `<original>-<suffix>`. |
 
-For each pullable skill, `skillctl pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow.
+For each pullable skill, `skillctl pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow. `pull` **follows provenance**: each skill refreshes from the library it was installed from (a run may touch several library caches), and its `source_sha` is rewritten to *that* library's HEAD. A skill whose recorded provenance is no longer a configured library is listed and skipped.
 
 **Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: each divergent skill's local folder is renamed to `<original>-<suffix>`, then the library version drops into the original destination.
 
@@ -189,9 +232,10 @@ skillctl detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-pat
 | `--all` | Add every detected new skill. Mutually exclusive with `--skill`/`--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Add every newly detected skill carrying this tag (repeatable). Default semantics is union. Mutually exclusive with `--skill`/`--all`. | Yes, unless `--skill` or `--all` |
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. | No |
+| `--to <name>` | Writable library to add the skills to. Defaults to the sole `write`-access library; **required when several are configured**. Refused for `read`/`pr` libraries. | Yes, when more than one writable library is configured |
 | `--target <path>` | Library-relative folder where the new skills should land. Use `.` for the library root (flat-layout libraries), or e.g. `skills` / `.claude/skills` for a subfolder. | **Yes** |
 
-`skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the library cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml`.
+`skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the chosen library's cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml` with that library's provenance. The target library is the sole writable library by default; with several, pass `--to <name>` (non-interactive) or pick from the Select (interactive). `read`/`pr` libraries cannot be detect targets (the latter pending the PR/MR flow).
 
 ### `skillctl remove` — remove skills from the current project
 
@@ -213,6 +257,23 @@ skillctl remove --all
 
 In each `results[]` item, `removed_folder` and `removed_entry` report which of the two actions actually happened. `.skills.toml` is only rewritten when at least one tracked entry is dropped. In an interactive TTY, a confirmation prompt is shown before anything is deleted; in non-interactive/`--json` mode the explicit `--skill`/`--all` flags are the authorisation. A symlinked destination is never followed — it is treated as "no folder on disk" so removal can only ever drop its manifest entry, never delete through the link.
 
+### `skillctl audit` — scan skill content for dangerous patterns
+
+```sh
+skillctl audit                       # scan every skill in the project
+skillctl audit --skill <name>        # scan only this skill (repeatable)
+skillctl audit --fail-on warning     # exit 5 if any finding reaches the threshold
+skillctl --json audit
+```
+
+| Flag | Purpose | Required in non-interactive |
+|---|---|---|
+| `--skill <name>` | Audit only this skill by name (repeatable). Mutually exclusive with `--all`. Errors if the name is unknown. | No |
+| `--all` | Audit every skill found in the project (the default behaviour). Mutually exclusive with `--skill`. | No |
+| `--fail-on <info\|warning\|critical>` | Exit with code 5 if any finding reaches this severity. Without it, `audit` always exits 0. | No |
+
+`audit` is **read-only** — it scans the `SKILL.md` and any bundled files of each skill discovered in the current project and reports a per-skill verdict (`safe` / `caution` / `warning` / `dangerous`). Categories: `credentials` (embedded keys/tokens — critical), `obfuscation` (long base64 / hex-escape blobs — warning), `shell` (`rm -rf`, `curl|sh` — warning/info), `dynamic-code` (`eval(` — info), and `prompt-injection` (instruction-override / conceal-from-user / exfiltration phrasings — warning). It is a heuristic advisory aid, not a guarantee. The same scan gates `skillctl add` (see above). The `--json` shape is `{ "command": "audit", "skills": [ { "name", "verdict", "findings": [ { "severity", "category", "label", "file", "line", "snippet" } ] } ], "summary": { "scanned", "worst_severity" } }`.
+
 ## Skill identity
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.
@@ -224,6 +285,7 @@ A "skill" is any folder containing a file literally named `SKILL.md`. The skill'
 - `2` — **configuration error**: no library configured, library cache missing, malformed URL, missing required flag in non-interactive mode (e.g. `--dest`, `--skill`, `--target`), invalid skill name, malformed `.skills.toml`.
 - `3` — **conflict**: a destination already exists with no `--on-conflict` policy in non-interactive mode, a fork target collides in the library, or a local fork target collides.
 - `4` — **git error**: `git clone`/`fetch`/`commit`/`push`/`hash-object`/`ls-tree` failed (auth, network, missing user identity, etc.).
+- `5` — **content-audit threshold exceeded**: `add --fail-on <severity>` refused to install (nothing was installed), or `audit --fail-on <severity>` found a finding at or above the threshold.
 
 Agents should branch on exit code first, then optionally inspect stderr for context. Stdout in `--json` mode is always either a single JSON object (success or partial success) or empty (early failure before output is built).
 
@@ -261,6 +323,14 @@ skillctl add --skill claude-api --skill review --dest .claude/skills
 
 ```sh
 skillctl add --all --dest .claude/skills --on-conflict skip
+```
+
+### Add a team library and install from it
+
+```sh
+skillctl library add team https://gitlab.com/acme/ai-config --access read
+skillctl list --from all                                  # browse what's where
+skillctl add --from team --skill deploy --dest .claude/skills   # audit is mandatory here
 ```
 
 ### Bulk-install every skill carrying a tag

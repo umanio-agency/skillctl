@@ -14,6 +14,21 @@ use anyhow::{Context, Result, anyhow};
 fn git_cmd() -> Command {
     let mut cmd = Command::new("git");
     cmd.args(["-c", "core.hooksPath=/dev/null"]);
+    // Pin the transport allowlist to https + ssh (the only forms
+    // `host::parse_remote_url` accepts). `protocol.allow=never` denies every
+    // unlisted transport — `ext::` (command execution), `file://`, `fd::`,
+    // `git://` — so even a library URL that smuggled an alternate transport
+    // past URL validation can never make git speak it, and we never depend on
+    // the operator's ambient `protocol.*.allow` config. https/ssh clone, fetch
+    // and push all keep working.
+    cmd.args([
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "protocol.https.allow=always",
+        "-c",
+        "protocol.ssh.allow=always",
+    ]);
     cmd
 }
 
@@ -138,7 +153,9 @@ pub fn fetch_and_fast_forward(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// True iff `git status --porcelain` reports an empty working tree + index.
+/// True iff `git status --porcelain` reports an empty working tree + index,
+/// ignoring skillctl's own lock file (which sits in the cache working tree
+/// while the command holds the cache lock).
 fn is_clean(repo: &Path) -> Result<bool> {
     let output = git_cmd()
         .current_dir(repo)
@@ -152,7 +169,20 @@ fn is_clean(repo: &Path) -> Result<bool> {
             scrub_stderr(&output.stderr)
         ));
     }
-    Ok(output.stdout.iter().all(|b| b.is_ascii_whitespace()))
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(porcelain_is_clean(&stdout))
+}
+
+/// Decide cleanliness from `git status --porcelain` output, ignoring
+/// skillctl's lock file. Each porcelain line is `XY <path>`; we only treat
+/// the tree as dirty if some entry other than the lock file is present.
+/// Without this, holding the cache lock makes every `fetch_and_fast_forward`
+/// see the cache as dirty and skip its refresh.
+fn porcelain_is_clean(stdout: &str) -> bool {
+    !stdout.lines().any(|line| {
+        let path = line.get(3..).unwrap_or("").trim();
+        !path.is_empty() && path != crate::lock::LOCK_FILE_NAME
+    })
 }
 
 pub fn head_sha(repo: &Path) -> Result<String> {
@@ -372,6 +402,73 @@ pub fn push(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The repo's current branch name (`git rev-parse --abbrev-ref HEAD`). For a
+/// freshly fetch-and-fast-forwarded cache this is its default branch — the
+/// base a PR/MR targets.
+pub fn current_branch(repo: &Path) -> Result<String> {
+    let output = git_cmd()
+        .current_dir(repo)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .with_context(|| {
+            format!(
+                "invoking `git rev-parse --abbrev-ref HEAD` in {}",
+                repo.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`git rev-parse --abbrev-ref HEAD` failed in {}: {}",
+            repo.display(),
+            scrub_stderr(&output.stderr)
+        ));
+    }
+    let branch = String::from_utf8(output.stdout)
+        .context("`git rev-parse --abbrev-ref HEAD` returned non-UTF8 output")?;
+    Ok(branch.trim().to_string())
+}
+
+/// Create (or reset) a local branch and switch to it (`git checkout -B`). `-B`
+/// (not `-b`) so a stale branch left by an interrupted PR run is reused rather
+/// than aborting; the cache is disposable and single-writer-locked.
+pub fn create_branch(repo: &Path, name: &str) -> Result<()> {
+    run_git(repo, &["checkout", "--quiet", "-B", name])
+}
+
+/// Force-switch to an existing branch (`git checkout --force`). Used to return
+/// the cache to its base branch after a PR run; `--force` discards any
+/// working-tree residue so the restore can't fail and strand the cache off-base
+/// (which would wedge the next command's `fetch_and_fast_forward`). Safe — the
+/// cache is disposable and single-writer-locked.
+pub fn checkout_branch(repo: &Path, name: &str) -> Result<()> {
+    run_git(repo, &["checkout", "--quiet", "--force", name])
+}
+
+/// Push `branch` to `origin`, setting upstream (`git push -u origin <branch>`).
+/// `--force-with-lease` so re-running a PR for the same skill updates the
+/// existing `skillctl/<skill>` branch instead of failing on a non-fast-forward,
+/// while still refusing to clobber a branch that moved underneath us.
+pub fn push_branch(repo: &Path, branch: &str) -> Result<()> {
+    let output = git_cmd()
+        .current_dir(repo)
+        .args(["push", "--force-with-lease", "-u", "origin", branch])
+        .output()
+        .with_context(|| {
+            format!(
+                "invoking `git push -u origin {branch}` in {}",
+                repo.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "`git push` of branch `{branch}` failed in {} (check your credentials and write access): {}",
+            repo.display(),
+            scrub_stderr(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
 fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
     let output = git_cmd()
         .current_dir(repo)
@@ -391,7 +488,30 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::scrub_stderr;
+    use super::{porcelain_is_clean, scrub_stderr};
+
+    #[test]
+    fn porcelain_empty_is_clean() {
+        assert!(porcelain_is_clean(""));
+        assert!(porcelain_is_clean("\n"));
+    }
+
+    #[test]
+    fn porcelain_only_lock_file_is_clean() {
+        assert!(porcelain_is_clean("?? .skillctl.lock"));
+        assert!(porcelain_is_clean("?? .skillctl.lock\n"));
+    }
+
+    #[test]
+    fn porcelain_other_untracked_is_dirty() {
+        assert!(!porcelain_is_clean("?? other.txt"));
+        assert!(!porcelain_is_clean(" M src/foo.rs"));
+    }
+
+    #[test]
+    fn porcelain_lock_plus_real_change_is_dirty() {
+        assert!(!porcelain_is_clean("?? .skillctl.lock\n M src/foo.rs"));
+    }
 
     #[test]
     fn scrub_keeps_clean_first_line() {

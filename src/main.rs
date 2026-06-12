@@ -1,3 +1,4 @@
+mod audit;
 mod cli;
 mod commands;
 mod config;
@@ -5,10 +6,12 @@ mod context;
 mod error;
 mod fs_util;
 mod git;
+mod host;
 mod lock;
 mod path_safety;
 mod project_config;
 mod prompt;
+mod review;
 mod sanitize;
 mod skill;
 mod ui;
@@ -30,6 +33,8 @@ fn main() -> std::process::ExitCode {
         Command::Pull(args) => commands::pull::run(args, &ctx),
         Command::Detect(args) => commands::detect::run(args, &ctx),
         Command::Remove(args) => commands::remove::run(args, &ctx),
+        Command::Library(sub) => commands::library::run(sub, &ctx),
+        Command::Audit(args) => commands::audit::run(args, &ctx),
     };
     match result {
         Ok(()) => ExitCode::Success.into(),

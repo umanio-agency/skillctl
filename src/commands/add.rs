@@ -1,5 +1,7 @@
+use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use cliclack::{input, select};
@@ -9,6 +11,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::audit::{self, Severity};
 use crate::cli::{AddArgs, OnConflict};
 use crate::commands::shared::{matches_tags, short_hint};
 use crate::config;
@@ -17,6 +20,7 @@ use crate::error::AppError;
 use crate::fs_util;
 use crate::git;
 use crate::lock;
+use crate::path_safety::normalize_lexical;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
 use crate::ui;
@@ -49,17 +53,42 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     ui::intro(ctx, "skillctl add")?;
 
     let cfg = config::load()?;
-    let library = cfg.library.ok_or_else(|| {
-        AppError::Config("no library configured — run `skillctl init<github-url>` first".into())
-    })?;
+    let has_selection = args.all || !args.skills.is_empty() || !args.tags.is_empty();
+    let from_all = args.from.as_deref() == Some("all");
+    // Interactive cross-library browsing via tabs: an explicit `--from all`, or
+    // a plain `add` when several libraries are configured — both only when no
+    // selection flag pins the choice. `--from <name>` always targets one
+    // library (no tabs).
+    if ctx.interactive
+        && !has_selection
+        && (from_all || (args.from.is_none() && cfg.libraries.len() > 1))
+    {
+        return run_tabbed(&args, ctx, &cfg);
+    }
+    if from_all {
+        return run_multi(&args, ctx, &cfg);
+    }
+    let library = cfg.resolve_read(args.from.as_deref())?.clone();
+
+    // Installing from a non-default library means third-party (untrusted)
+    // content, for which the content audit is mandatory — `--no-audit` is
+    // refused so the audit can never be silenced for content you don't own.
+    if args.no_audit && !library.default {
+        return Err(AppError::Config(format!(
+            "refusing --no-audit when installing from the non-default library `{}`: third-party content is always audited; drop --no-audit",
+            library.name
+        ))
+        .into());
+    }
 
     let library_root =
         config::library_cache_path(&library.url).map_err(|e| AppError::Config(e.to_string()))?;
     if !library_root.exists() {
         return Err(AppError::Config(format!(
-            "library cache not found at {} — run `skillctl init{}` again",
+            "cache for library `{}` not found at {} — re-clone it with `skillctl library add {} <url>` (or `skillctl init <url>` for the default library)",
+            library.name,
             fs_util::display_path(&library_root),
-            library.url
+            library.name
         ))
         .into());
     }
@@ -91,6 +120,18 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
         emit_json(ctx, None, &[]);
         return Ok(());
     }
+
+    // Content audit of the (untrusted) skill content before anything lands in
+    // the project. Warn-only by default; `--fail-on <severity>` refuses the
+    // whole batch (nothing is installed) if any selected skill reaches the
+    // threshold; `--no-audit` skips entirely. The returned map (skill name →
+    // verdict) is surfaced per-skill in the JSON output so non-interactive
+    // consumers get the audit signal even in warn-only mode.
+    let audit_verdicts = if args.no_audit {
+        HashMap::new()
+    } else {
+        audit_gate(ctx, &selected, args.fail_on.map(Into::into))?
+    };
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     // Serialise concurrent skillctl runs on this project's .skills.toml.
@@ -198,6 +239,8 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                 source_sha: source_sha.clone(),
                 destination: destination_rel,
                 installed_at: installed_at.clone(),
+                library: Some(library.name.clone()),
+                library_url: Some(library.url.clone()),
             })
         })();
         match outcome {
@@ -211,6 +254,7 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
                     "status": "installed",
                     "path": dest_display,
                     "source_sha": source_sha_for_json,
+                    "audit_verdict": audit_verdicts.get(skill.name.as_str()).copied(),
                 }));
             }
             Err(e) => {
@@ -240,6 +284,561 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     }
     emit_json(ctx, Some(&dest_root), &results);
     Ok(())
+}
+
+/// Multi-source install (`--from all`): install matching skills from **every**
+/// configured library in one run. Selection is flag-driven (`--all` / `--skill`
+/// / `--tag`) — interactive cross-library browsing (tabs) is a later step. The
+/// default library is processed first so it keeps the un-suffixed name when two
+/// libraries offer the same skill; later collisions are suffixed `-<library>`.
+/// The content audit is mandatory across the span (the span is third-party by
+/// definition unless it is the lone default library).
+fn run_multi(args: &AddArgs, ctx: &Context, cfg: &config::Config) -> Result<()> {
+    if cfg.libraries.is_empty() {
+        return Err(AppError::Config(
+            "no libraries configured — run `skillctl init <url>` or `skillctl library add <name> <url>` first".into(),
+        )
+        .into());
+    }
+    if !args.all && args.skills.is_empty() && args.tags.is_empty() {
+        return Err(AppError::Config(
+            "`--from all` needs a selection in non-interactive mode: pass --all, --skill <name>, or --tag <name> (or run interactively to browse libraries with tabs)".into(),
+        )
+        .into());
+    }
+    // `--no-audit` is refused as soon as the span includes a non-default
+    // (untrusted third-party) library.
+    if args.no_audit && cfg.libraries.iter().any(|l| !l.default) {
+        return Err(AppError::Config(
+            "refusing --no-audit with `--from all`: the span includes non-default (third-party) libraries, whose content is always audited; drop --no-audit".into(),
+        )
+        .into());
+    }
+
+    // Default library first so it keeps the bare name on a collision.
+    let mut libs: Vec<&config::Library> = Vec::new();
+    if let Some(d) = cfg.default_library() {
+        libs.push(d);
+    }
+    for l in &cfg.libraries {
+        if !l.default {
+            libs.push(l);
+        }
+    }
+
+    // Resolve cache paths; drop unreachable libraries with a warning.
+    let mut reachable: Vec<(&config::Library, PathBuf)> = Vec::new();
+    for lib in libs {
+        match config::library_cache_path(&lib.url) {
+            Ok(p) if p.exists() => reachable.push((lib, p)),
+            Ok(p) => ui::log_warning(
+                ctx,
+                format!(
+                    "skipping `{}`: cache not found at {} (re-clone with `skillctl library add {} <url>`)",
+                    lib.name,
+                    fs_util::display_path(&p),
+                    lib.name
+                ),
+            )?,
+            Err(e) => ui::log_warning(ctx, format!("skipping `{}`: {e}", lib.name))?,
+        }
+    }
+    if reachable.is_empty() {
+        return Err(AppError::Config("no reachable libraries to install from".into()).into());
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+
+    // Acquire every distinct cache lock up front (sorted, de-duplicated path
+    // order so concurrent `--from all` runs request them in the same order),
+    // then the project lock — preserving the codebase-wide cache-before-project
+    // ordering. The locks are non-blocking, so a contended run fails fast
+    // rather than hanging regardless.
+    let mut lock_paths: Vec<PathBuf> = reachable.iter().map(|(_, p)| p.clone()).collect();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut _cache_locks = Vec::with_capacity(lock_paths.len());
+    for p in &lock_paths {
+        _cache_locks.push(lock::acquire_exclusive(p, "library cache")?);
+    }
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+
+    // Refresh + discover + select per library (default-first order).
+    let mut selected: Vec<(Skill, config::Library, PathBuf)> = Vec::new();
+    let mut matched_skill_names: HashSet<String> = HashSet::new();
+    for (lib, root) in &reachable {
+        if let Err(e) = git::fetch_and_fast_forward(root) {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "could not refresh `{}` ({e}); using cached version",
+                    lib.name
+                ),
+            )?;
+        }
+        let discovered = skill::discover(root, false)?;
+        for w in &discovered.warnings {
+            ui::log_warning(ctx, w)?;
+        }
+        for s in discovered.skills {
+            let take = if args.all {
+                true
+            } else if !args.skills.is_empty() {
+                let hit = args.skills.iter().any(|n| n == &s.name);
+                if hit {
+                    matched_skill_names.insert(s.name.clone());
+                }
+                hit
+            } else {
+                matches_tags(&s.tags, &args.tags, args.all_tags)
+            };
+            if take {
+                selected.push((s, (*lib).clone(), root.clone()));
+            }
+        }
+    }
+
+    // Requested `--skill` names that matched in no library.
+    for name in &args.skills {
+        if !matched_skill_names.contains(name) {
+            ui::log_warning(
+                ctx,
+                format!("no skill named `{name}` in any library; skipped"),
+            )?;
+        }
+    }
+
+    if selected.is_empty() {
+        ui::outro(ctx, "no matching skills found")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    install_multi_source(args, ctx, &cwd, selected)
+}
+
+/// Interactive multi-library install: open the picker with a tab per library
+/// (default first), discovered eagerly before entering raw mode so no git work
+/// runs inside the TUI. Selection accumulates across tabs and feeds the same
+/// install path as `--from all`. Reached only in interactive mode with no
+/// selection flags.
+fn run_tabbed(args: &AddArgs, ctx: &Context, cfg: &config::Config) -> Result<()> {
+    if cfg.libraries.is_empty() {
+        return Err(AppError::Config(
+            "no libraries configured — run `skillctl init <url>` or `skillctl library add <name> <url>` first".into(),
+        )
+        .into());
+    }
+    if args.no_audit && cfg.libraries.iter().any(|l| !l.default) {
+        return Err(AppError::Config(
+            "refusing --no-audit: a non-default (third-party) library is configured and its content is always audited; drop --no-audit".into(),
+        )
+        .into());
+    }
+
+    // Default library first → it becomes the opening tab.
+    let mut libs: Vec<&config::Library> = Vec::new();
+    if let Some(d) = cfg.default_library() {
+        libs.push(d);
+    }
+    for l in &cfg.libraries {
+        if !l.default {
+            libs.push(l);
+        }
+    }
+
+    let mut reachable: Vec<(&config::Library, PathBuf)> = Vec::new();
+    for lib in libs {
+        match config::library_cache_path(&lib.url) {
+            Ok(p) if p.exists() => reachable.push((lib, p)),
+            Ok(p) => ui::log_warning(
+                ctx,
+                format!(
+                    "skipping `{}`: cache not found at {} (re-clone with `skillctl library add {} <url>`)",
+                    lib.name,
+                    fs_util::display_path(&p),
+                    lib.name
+                ),
+            )?,
+            Err(e) => ui::log_warning(ctx, format!("skipping `{}`: {e}", lib.name))?,
+        }
+    }
+    if reachable.is_empty() {
+        return Err(AppError::Config("no reachable libraries to install from".into()).into());
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    // Every distinct cache lock first (sorted + deduped, so concurrent runs
+    // request them in the same order), then the project lock — the same
+    // cache-before-project ordering as `run_multi`; non-blocking, so a
+    // contended run fails fast rather than hanging.
+    let mut lock_paths: Vec<PathBuf> = reachable.iter().map(|(_, p)| p.clone()).collect();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut _cache_locks = Vec::with_capacity(lock_paths.len());
+    for p in &lock_paths {
+        _cache_locks.push(lock::acquire_exclusive(p, "library cache")?);
+    }
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+
+    // Eager per-tab discovery (before raw mode).
+    let mut prompt = crate::prompt::tabbed::<(Skill, config::Library, PathBuf)>(
+        "Skills to install — ←/→ switch library",
+    )
+    .required(true);
+    let mut total = 0usize;
+    for (lib, root) in &reachable {
+        if let Err(e) = git::fetch_and_fast_forward(root) {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "could not refresh `{}` ({e}); using cached version",
+                    lib.name
+                ),
+            )?;
+        }
+        let discovered = skill::discover(root, false)?;
+        for w in &discovered.warnings {
+            ui::log_warning(ctx, w)?;
+        }
+        let items: Vec<((Skill, config::Library, PathBuf), String, String)> = discovered
+            .skills
+            .into_iter()
+            .map(|s| {
+                let label = s.name.clone();
+                let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
+                ((s, (*lib).clone(), root.clone()), label, hint)
+            })
+            .collect();
+        total += items.len();
+        prompt = prompt.tab(lib.name.clone(), items);
+    }
+
+    if total == 0 {
+        ui::outro(ctx, "no skills found in any configured library")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    let selected = prompt.interact()?;
+    if selected.is_empty() {
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    install_multi_source(args, ctx, &cwd, selected)
+}
+
+/// Shared install tail for multi-source add: plan collision-suffixed names,
+/// audit the whole span (atomic on `--fail-on`), copy each skill, and record
+/// provenance. Used by both flag-driven `--from all` and the interactive
+/// library-tabs path. Cache + project locks are held by the caller.
+fn install_multi_source(
+    args: &AddArgs,
+    ctx: &Context,
+    cwd: &Path,
+    selected: Vec<(Skill, config::Library, PathBuf)>,
+) -> Result<()> {
+    let cwd = cwd.to_path_buf();
+    let dest_root = resolve_destination(args, ctx, &cwd)?;
+    let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
+    let mut project_cfg = project_config::load(&cwd)?;
+
+    // Plan final names, suffixing `-<library>` on a collision with an
+    // already-tracked entry or an earlier skill in this same run.
+    struct Plan {
+        skill: Skill,
+        lib: config::Library,
+        root: PathBuf,
+        name: String,
+        folder: OsString,
+    }
+    let mut taken_names: HashSet<String> = project_cfg
+        .installed
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
+    // Keyed by a normalized absolute path so the seed (from existing
+    // `.skills.toml` entries) and the per-skill check (computed from a possibly
+    // relative `--dest`) compare in the same form — otherwise a relative
+    // `--dest` never matches a seeded entry and a differently-named incoming
+    // skill could clobber a tracked folder / duplicate a destination.
+    let mut taken_dests: HashSet<PathBuf> = project_cfg
+        .installed
+        .iter()
+        .map(|i| normalize_lexical(&cwd.join(&i.destination)))
+        .collect();
+    let mut plans: Vec<Plan> = Vec::new();
+    let mut results: Vec<Value> = Vec::new();
+    for (skill, lib, root) in selected {
+        let folder_base = match skill.path.file_name() {
+            Some(n) => n.to_os_string(),
+            None => {
+                let _ = ui::log_warning(
+                    ctx,
+                    format!("skipping {}: source has no folder name", skill.name),
+                );
+                results.push(json!({
+                    "name": skill.name,
+                    "status": "failed",
+                    "reason": "source has no folder name",
+                }));
+                continue;
+            }
+        };
+        let base_name = skill.name.clone();
+        let mut name = base_name.clone();
+        let mut folder = folder_base.clone();
+        if name_or_dest_taken(&taken_names, &taken_dests, &cwd, &dest_root, &name, &folder) {
+            let folder_str = folder_base.to_string_lossy();
+            name = format!("{base_name}-{}", lib.name);
+            folder = OsString::from(format!("{folder_str}-{}", lib.name));
+            let mut n = 2;
+            while name_or_dest_taken(&taken_names, &taken_dests, &cwd, &dest_root, &name, &folder) {
+                name = format!("{base_name}-{}-{n}", lib.name);
+                folder = OsString::from(format!("{folder_str}-{}-{n}", lib.name));
+                n += 1;
+            }
+        }
+        taken_names.insert(name.clone());
+        taken_dests.insert(dest_key(&cwd, &dest_root, &folder));
+        plans.push(Plan {
+            skill,
+            lib,
+            root,
+            name,
+            folder,
+        });
+    }
+
+    // Audit the whole span. Warn-only unless `--fail-on`; a breach refuses the
+    // entire batch atomically (nothing is copied below).
+    let fail_on: Option<Severity> = args.fail_on.map(Into::into);
+    let mut verdicts: HashMap<String, &'static str> = HashMap::new();
+    let mut blocked: Vec<String> = Vec::new();
+    for plan in &plans {
+        let report = audit::scan_skill(&plan.skill.path);
+        verdicts.insert(plan.name.clone(), report.verdict().as_str());
+        for f in &report.findings {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "audit[{}] {}: {} ({}:{})",
+                    plan.name,
+                    f.severity.as_str(),
+                    f.label,
+                    f.file,
+                    f.line
+                ),
+            )?;
+        }
+        if fail_on.is_some_and(|t| report.max_severity().is_some_and(|m| m >= t)) {
+            blocked.push(format!("{} ({})", plan.name, report.verdict().as_str()));
+        }
+    }
+    if !blocked.is_empty() {
+        let threshold = fail_on.map(|t| t.as_str()).unwrap_or("warning");
+        return Err(AppError::Audit(format!(
+            "refusing to install (content audit ≥ `{threshold}`): {}",
+            blocked.join(", ")
+        ))
+        .into());
+    }
+
+    let installed_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("formatting installation timestamp")?;
+    let mut head_cache: HashMap<PathBuf, String> = HashMap::new();
+    let mut aborted = false;
+    for plan in plans {
+        let dest = dest_root.join(&plan.folder);
+        if dest.exists() {
+            match resolve_conflict(ctx, &dest, conflict_policy.clone())? {
+                ConflictAction::Overwrite => {
+                    if let Err(e) = fs::remove_dir_all(&dest)
+                        .with_context(|| format!("removing {}", dest.display()))
+                    {
+                        let _ =
+                            ui::log_warning(ctx, format!("add failed for `{}`: {e}", plan.name));
+                        results.push(json!({
+                            "name": plan.name,
+                            "status": "failed",
+                            "reason": e.to_string(),
+                        }));
+                        continue;
+                    }
+                }
+                ConflictAction::Skip => {
+                    ui::log_info(ctx, format!("skipped {}", plan.name))?;
+                    results.push(json!({
+                        "name": plan.name,
+                        "status": "skipped",
+                        "reason": format!("destination {} already exists", dest.display()),
+                    }));
+                    continue;
+                }
+                ConflictAction::Abort => {
+                    project_config::save(&cwd, &project_cfg)?;
+                    ui::outro_cancel(ctx, "aborted")?;
+                    results.push(json!({
+                        "name": plan.name,
+                        "status": "aborted",
+                        "reason": format!("destination {} already exists", dest.display()),
+                    }));
+                    aborted = true;
+                    break;
+                }
+            }
+        }
+
+        let source_sha = match head_cache.get(&plan.root) {
+            Some(s) => s.clone(),
+            None => {
+                let s = git::head_sha(&plan.root).map_err(|e| AppError::Git(e.to_string()))?;
+                head_cache.insert(plan.root.clone(), s.clone());
+                s
+            }
+        };
+
+        let outcome: Result<InstalledSkill> = (|| {
+            fs_util::copy_dir_all(&plan.skill.path, &dest)?;
+            let source_path = plan
+                .skill
+                .path
+                .strip_prefix(&plan.root)
+                .with_context(|| {
+                    format!(
+                        "computing path of {} relative to library at {}",
+                        plan.skill.path.display(),
+                        plan.root.display()
+                    )
+                })?
+                .to_path_buf();
+            let destination_rel = fs_util::relative_to_or_self(&dest, &cwd);
+            Ok(InstalledSkill {
+                name: plan.name.clone(),
+                source_path,
+                source_sha: source_sha.clone(),
+                destination: destination_rel,
+                installed_at: installed_at.clone(),
+                library: Some(plan.lib.name.clone()),
+                library_url: Some(plan.lib.url.clone()),
+            })
+        })();
+        match outcome {
+            Ok(entry) => {
+                let dest_display = entry.destination.display().to_string();
+                let source_sha_for_json = entry.source_sha.clone();
+                project_cfg.installed.push(entry);
+                ui::log_success(
+                    ctx,
+                    format!(
+                        "{} → {} (from {})",
+                        plan.name,
+                        dest.display(),
+                        plan.lib.name
+                    ),
+                )?;
+                results.push(json!({
+                    "name": plan.name,
+                    "status": "installed",
+                    "path": dest_display,
+                    "library": plan.lib.name,
+                    "source_sha": source_sha_for_json,
+                    "audit_verdict": verdicts.get(plan.name.as_str()).copied(),
+                }));
+            }
+            Err(e) => {
+                let _ = ui::log_warning(ctx, format!("add failed for `{}`: {e}", plan.name));
+                results.push(json!({
+                    "name": plan.name,
+                    "status": "failed",
+                    "reason": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    project_config::save(&cwd, &project_cfg)?;
+    if !aborted {
+        ui::outro(ctx, summary_text(&results))?;
+    }
+    emit_json(ctx, Some(&dest_root), &results);
+    Ok(())
+}
+
+/// Normalized absolute key for a destination folder, so destinations expressed
+/// relative to `cwd` (a relative `--dest`) and absolute seeds compare equal.
+fn dest_key(cwd: &Path, dest_root: &Path, folder: &OsStr) -> PathBuf {
+    let joined = dest_root.join(folder);
+    let abs = if joined.is_absolute() {
+        joined
+    } else {
+        cwd.join(joined)
+    };
+    normalize_lexical(&abs)
+}
+
+/// True when `name` (as a `.skills.toml` entry) or the destination folder is
+/// already claimed — drives the `-<library>` collision suffix in multi-source
+/// add. Destinations are compared via [`dest_key`] so relative and absolute
+/// spellings of the same path match.
+fn name_or_dest_taken(
+    taken_names: &HashSet<String>,
+    taken_dests: &HashSet<PathBuf>,
+    cwd: &Path,
+    dest_root: &Path,
+    name: &str,
+    folder: &OsStr,
+) -> bool {
+    taken_names.contains(name) || taken_dests.contains(&dest_key(cwd, dest_root, folder))
+}
+
+/// Scan each selected skill's content. Findings are logged as warnings
+/// (no-op under `--json`); when `fail_on` is set, any skill reaching that
+/// severity blocks the entire batch (nothing is installed) so untrusted
+/// content never lands in the project on a failed bar. Returns a map of skill
+/// name → verdict so the caller can surface it in the JSON output (the signal
+/// non-interactive consumers would otherwise miss in warn-only mode).
+fn audit_gate(
+    ctx: &Context,
+    selected: &[Skill],
+    fail_on: Option<Severity>,
+) -> Result<HashMap<String, &'static str>> {
+    let mut blocked: Vec<String> = Vec::new();
+    let mut verdicts: HashMap<String, &'static str> = HashMap::new();
+    for s in selected {
+        let report = audit::scan_skill(&s.path);
+        verdicts.insert(s.name.clone(), report.verdict().as_str());
+        for f in &report.findings {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "audit[{}] {}: {} ({}:{})",
+                    s.name,
+                    f.severity.as_str(),
+                    f.label,
+                    f.file,
+                    f.line
+                ),
+            )?;
+        }
+        let over_threshold = fail_on.is_some_and(|t| report.max_severity().is_some_and(|m| m >= t));
+        if over_threshold {
+            blocked.push(format!("{} ({})", s.name, report.verdict().as_str()));
+        }
+    }
+    if !blocked.is_empty() {
+        // `blocked` is only populated when `fail_on` is `Some`.
+        let threshold = fail_on.map(|t| t.as_str()).unwrap_or("warning");
+        return Err(AppError::Audit(format!(
+            "refusing to install (content audit ≥ `{threshold}`): {}. Re-run with --no-audit to override.",
+            blocked.join(", ")
+        ))
+        .into());
+    }
+    Ok(verdicts)
 }
 
 fn emit_json(ctx: &Context, destination: Option<&PathBuf>, results: &[Value]) {
@@ -466,5 +1065,56 @@ fn pick_destination_interactive(existing: Vec<PathBuf>) -> Result<PathBuf> {
                 .interact()?;
             Ok(PathBuf::from(typed.trim()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dest_key_unifies_relative_and_seeded_forms() {
+        let cwd = Path::new("/proj");
+        // Seed form: an existing `.skills.toml` destination joined onto cwd.
+        let seeded = normalize_lexical(&cwd.join(".claude/skills/shared"));
+        // Check form: a relative `--dest` plus the folder name.
+        let computed = dest_key(cwd, Path::new(".claude/skills"), OsStr::new("shared"));
+        assert_eq!(
+            seeded, computed,
+            "relative --dest must collide with a seeded tracked destination"
+        );
+    }
+
+    #[test]
+    fn dest_key_absolute_dest_root_is_respected() {
+        let cwd = Path::new("/proj");
+        let computed = dest_key(cwd, Path::new("/abs/skills"), OsStr::new("foo"));
+        assert_eq!(computed, Path::new("/abs/skills/foo"));
+    }
+
+    #[test]
+    fn name_or_dest_taken_matches_seeded_destination() {
+        let cwd = Path::new("/proj");
+        let names: HashSet<String> = HashSet::new();
+        let mut dests: HashSet<PathBuf> = HashSet::new();
+        dests.insert(normalize_lexical(&cwd.join(".claude/skills/foo")));
+        // Same folder via relative --dest must be reported taken.
+        assert!(name_or_dest_taken(
+            &names,
+            &dests,
+            cwd,
+            Path::new(".claude/skills"),
+            "anything",
+            OsStr::new("foo")
+        ));
+        // A different folder is free.
+        assert!(!name_or_dest_taken(
+            &names,
+            &dests,
+            cwd,
+            Path::new(".claude/skills"),
+            "anything",
+            OsStr::new("bar")
+        ));
     }
 }

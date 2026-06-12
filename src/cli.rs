@@ -41,16 +41,70 @@ pub enum Command {
     Detect(DetectArgs),
     /// Remove skills from the current project (folder + any .skills.toml entry).
     Remove(RemoveArgs),
+    /// Manage configured skill libraries (read sources + write targets).
+    #[command(subcommand)]
+    Library(LibraryCommand),
+    /// Scan skills' content for dangerous patterns and report a verdict.
+    Audit(AuditArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LibraryCommand {
+    /// Register a new library by name and URL (clones it into the cache).
+    Add(LibraryAddArgs),
+    /// List the configured libraries.
+    List,
+    /// Remove a configured library (drops the config entry; leaves the cache).
+    Remove(LibraryRefArgs),
+    /// Mark a configured library as the default.
+    SetDefault(LibraryRefArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct LibraryAddArgs {
+    /// Short name used to reference this library (e.g. with future --from/--to).
+    pub name: String,
+
+    /// Repository URL — GitHub, GitLab, or self-hosted; HTTPS or SSH.
+    pub url: String,
+
+    /// Access level: `read` (default — consume only), `write`, or `pr`.
+    #[arg(long, value_enum, default_value = "read")]
+    pub access: AccessArg,
+
+    /// Mark this library as the default. The first library added is always
+    /// the default regardless of this flag.
+    #[arg(long)]
+    pub default: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct LibraryRefArgs {
+    /// Name of the configured library.
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AccessArg {
+    Read,
+    Write,
+    Pr,
 }
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// GitHub URL of the skills library (e.g. https://github.com/owner/repo).
+    /// Repository URL of the skills library — GitHub, GitLab, or self-hosted;
+    /// HTTPS or SSH (e.g. https://github.com/owner/repo).
     pub url: String,
 }
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// Library to list from, by name (defaults to the default library). Pass
+    /// `all` to list every configured library, with the source shown per skill.
+    #[arg(long, value_name = "NAME")]
+    pub from: Option<String>,
+
     /// Show only skills carrying this tag. Repeatable; default semantics is
     /// union (any of the given tags).
     #[arg(long = "tag", value_name = "TAG")]
@@ -64,6 +118,12 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
+    /// Library to install from, by name (defaults to the default library).
+    /// Installing from a non-default (third-party) library forces the content
+    /// audit on — `--no-audit` is refused in that case.
+    #[arg(long, value_name = "NAME")]
+    pub from: Option<String>,
+
     /// Skill name to install. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
@@ -92,10 +152,27 @@ pub struct AddArgs {
     /// Required in non-interactive mode if any conflict is encountered.
     #[arg(long, value_enum, value_name = "POLICY")]
     pub on_conflict: Option<OnConflict>,
+
+    /// Skip the content security audit of skills before installing them.
+    #[arg(long)]
+    pub no_audit: bool,
+
+    /// Refuse to install any skill whose content audit reaches this severity
+    /// (`info` | `warning` | `critical`). Without it, the audit is warn-only.
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    pub fail_on: Option<SeverityArg>,
 }
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
+    /// Promote the selected skills into this writable library instead of
+    /// pushing each back to its own provenance. Use it to publish a skill
+    /// installed from a read-only source into your own (or a team) library.
+    /// The target must be writable; on a path collision in the target, the
+    /// `--on-divergence` policy applies (overwrite / fork / skip).
+    #[arg(long, value_name = "NAME")]
+    pub to: Option<String>,
+
     /// Skill name to push. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
@@ -127,9 +204,20 @@ pub struct PushArgs {
     #[arg(long, value_name = "SUFFIX")]
     pub fork_suffix: Option<String>,
 
-    /// Override the auto-generated commit message.
+    /// Override the auto-generated commit message. For a `pr`-access library,
+    /// this is also the PR/MR description.
     #[arg(long, value_name = "MESSAGE")]
     pub message: Option<String>,
+
+    /// Title for the PR/MR opened against a `pr`-access library (defaults to an
+    /// auto-generated title). Ignored for `write` libraries.
+    #[arg(long, value_name = "TITLE")]
+    pub pr_title: Option<String>,
+
+    /// Skip the interactive PR/MR confirmation (open it without prompting).
+    /// Always implied in non-interactive mode.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -169,6 +257,12 @@ pub struct PullArgs {
 
 #[derive(Args, Debug)]
 pub struct DetectArgs {
+    /// Library to add the new skills to, by name. Must be a writable library.
+    /// Defaults to the sole writable library; required when several are
+    /// configured (non-interactive) or chosen interactively.
+    #[arg(long, value_name = "NAME")]
+    pub to: Option<String>,
+
     /// Name of a new local skill to add. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,
@@ -211,6 +305,29 @@ pub struct RemoveArgs {
     /// skillctl, created locally, or orphaned .skills.toml entries).
     #[arg(long, conflicts_with = "skills")]
     pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AuditArgs {
+    /// Audit only this skill (by name). Repeatable. Mutually exclusive with --all.
+    #[arg(long = "skill", value_name = "NAME", conflicts_with = "all")]
+    pub skills: Vec<String>,
+
+    /// Audit every skill found in the current project.
+    #[arg(long, conflicts_with = "skills")]
+    pub all: bool,
+
+    /// Exit non-zero (code 5) if any finding reaches this severity
+    /// (`info` | `warning` | `critical`).
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    pub fail_on: Option<SeverityArg>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum SeverityArg {
+    Info,
+    Warning,
+    Critical,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

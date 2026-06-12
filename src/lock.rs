@@ -25,6 +25,12 @@ use fs4::fs_std::FileExt;
 
 use crate::error::AppError;
 
+/// Name of the advisory lock file created next to a guarded resource. It lives
+/// in the library-cache working tree while a command holds the lock, so
+/// `git::is_clean` must ignore it (otherwise every refresh would see the cache
+/// as dirty and skip the fetch).
+pub const LOCK_FILE_NAME: &str = ".skillctl.lock";
+
 /// Holds an exclusive flock on a lock file. The lock is released when this
 /// value is dropped (or the process exits, since the OS owns the lock).
 #[derive(Debug)]
@@ -45,7 +51,7 @@ impl Drop for LockGuard {
 /// Acquire an exclusive advisory lock at `<dir>/.skillctl.lock`. Fails
 /// immediately (no blocking) if another process already holds the lock.
 pub fn acquire_exclusive(dir: &Path, what: &str) -> Result<LockGuard> {
-    let lock_path = dir.join(".skillctl.lock");
+    let lock_path = dir.join(LOCK_FILE_NAME);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
