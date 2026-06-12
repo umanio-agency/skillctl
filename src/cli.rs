@@ -165,6 +165,14 @@ pub struct AddArgs {
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
+    /// Promote the selected skills into this writable library instead of
+    /// pushing each back to its own provenance. Use it to publish a skill
+    /// installed from a read-only source into your own (or a team) library.
+    /// The target must be writable; on a path collision in the target, the
+    /// `--on-divergence` policy applies (overwrite / fork / skip).
+    #[arg(long, value_name = "NAME")]
+    pub to: Option<String>,
+
     /// Skill name to push. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]
     pub skills: Vec<String>,

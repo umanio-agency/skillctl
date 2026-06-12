@@ -115,6 +115,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .into());
     }
 
+    // `--to` switches push into promotion mode: publish the selected skills
+    // into a chosen writable library (rewriting their provenance), rather than
+    // pushing each back to where it came from.
+    if args.to.is_some() {
+        return run_promote(&args, ctx, &cfg);
+    }
+
     let cwd = std::env::current_dir().context("reading current directory")?;
 
     // `push` writes each skill back to its own provenance library, so a run
@@ -954,10 +961,393 @@ fn pr_title(names: &[String]) -> String {
     }
 }
 
+/// One planned promotion: which installed entry, where it lands in the target
+/// library, and — when a collision was resolved by forking — the new name and
+/// new local destination.
+struct PromotePlan {
+    index: usize,
+    target_relative: PathBuf,
+    fork: Option<(String, PathBuf)>,
+}
+
+/// Promotion mode (`push --to <lib>`): publish the selected installed skills
+/// into a chosen writable library, rewriting their provenance to it. Unlike the
+/// round-trip, the skill need not already exist in the target — its local
+/// content is added there. On a target-path collision the `--on-divergence`
+/// policy (overwrite / fork = add as new skill / skip) decides.
+fn run_promote(args: &PushArgs, ctx: &Context, cfg: &config::Config) -> Result<()> {
+    let to = args.to.as_deref().unwrap_or_default();
+    let target = cfg.resolve_write(Some(to))?.clone();
+    if target.access == config::Access::Pr {
+        return Err(AppError::Config(format!(
+            "promotion to `{}` (pr access) isn't supported yet — choose a write-access library",
+            target.name
+        ))
+        .into());
+    }
+    let target_root =
+        config::library_cache_path(&target.url).map_err(|e| AppError::Config(e.to_string()))?;
+    if !target_root.exists() {
+        return Err(AppError::Config(format!(
+            "cache for library `{}` not found — run `skillctl library add {} {}` to clone it",
+            target.name, target.name, target.url
+        ))
+        .into());
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let _cache_lock = lock::acquire_exclusive(&target_root, "library cache")?;
+    if let Err(e) = git::fetch_and_fast_forward(&target_root) {
+        ui::log_warning(
+            ctx,
+            format!(
+                "could not refresh `{}` ({e}); promoting against the cached HEAD",
+                target.name
+            ),
+        )?;
+    }
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+    let mut project_cfg = project_config::load(&cwd)?;
+    if project_cfg.installed.is_empty() {
+        ui::outro(
+            ctx,
+            "no skills installed in this project (.skills.toml is empty)",
+        )?;
+        emit_json(ctx, &[], None);
+        return Ok(());
+    }
+
+    let selected = select_for_promotion(args, ctx, &cwd, &project_cfg)?;
+    if selected.is_empty() {
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, &[], None);
+        return Ok(());
+    }
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut plans: Vec<PromotePlan> = Vec::new();
+    // Target paths already claimed by an earlier plan in THIS run. A path is a
+    // collision if it exists on disk OR another selected skill is already
+    // landing there — otherwise two skills sharing a `source_path` would both
+    // pass the on-disk check (nothing is written until the apply loop) and the
+    // second would silently overwrite the first, while the first's provenance
+    // still gets rewritten to claim it.
+    let mut planned: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for idx in selected {
+        let installed = &project_cfg.installed[idx];
+        let name = installed.name.clone();
+        let local_dir = safe_join(&cwd, &installed.destination)?;
+        if !local_dir.exists() {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "{name} — local folder {} not found; skipping",
+                    installed.destination.display()
+                ),
+            )?;
+            results
+                .push(json!({"name": name, "status": "skipped", "reason": "local folder missing"}));
+            continue;
+        }
+        let target_relative = installed.source_path.clone();
+        let collides = safe_join(&target_root, &target_relative)?.exists()
+            || planned.contains(&crate::path_safety::normalize_lexical(&target_relative));
+        if !collides {
+            planned.insert(crate::path_safety::normalize_lexical(&target_relative));
+            plans.push(PromotePlan {
+                index: idx,
+                target_relative,
+                fork: None,
+            });
+            continue;
+        }
+        // Collision in the target library (or with another skill in this run):
+        // resolve.
+        match resolve_promotion_collision(ctx, args, &name, &target.name)? {
+            DivergenceChoice::Overwrite => {
+                planned.insert(crate::path_safety::normalize_lexical(&target_relative));
+                plans.push(PromotePlan {
+                    index: idx,
+                    target_relative,
+                    fork: None,
+                });
+            }
+            DivergenceChoice::Fork => {
+                if let ApplyOp::Fork {
+                    new_name,
+                    new_library_path,
+                    new_local_destination,
+                } = resolve_fork_op(ctx, installed, &target_root, args.fork_suffix.as_deref())?
+                {
+                    planned.insert(crate::path_safety::normalize_lexical(&new_library_path));
+                    plans.push(PromotePlan {
+                        index: idx,
+                        target_relative: new_library_path,
+                        fork: Some((new_name, new_local_destination)),
+                    });
+                }
+            }
+            DivergenceChoice::Skip => {
+                ui::log_info(ctx, format!("skipped {name}"))?;
+                results.push(json!({
+                    "name": name,
+                    "status": "skipped",
+                    "reason": format!("already exists in `{}`", target.name),
+                }));
+            }
+        }
+    }
+
+    if plans.is_empty() {
+        ui::outro(ctx, "nothing to promote")?;
+        emit_json(ctx, &results, None);
+        return Ok(());
+    }
+
+    // Apply each plan's content onto the target cache (continue-on-error).
+    let mut applied: Vec<PromotePlan> = Vec::new();
+    for plan in plans {
+        let installed = &project_cfg.installed[plan.index];
+        let name = installed.name.clone();
+        let local_dir = safe_join(&cwd, &installed.destination)?;
+        let target_dir = safe_join(&target_root, &plan.target_relative)?;
+        let outcome: Result<()> = (|| {
+            fs_util::replace_folder_contents(&local_dir, &target_dir)?;
+            git::add_all(&target_root, &plan.target_relative)
+                .map_err(|e| AppError::Git(e.to_string()))?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => applied.push(plan),
+            Err(e) => {
+                let _ = ui::log_warning(ctx, format!("promotion failed for `{name}`: {e}"));
+                let _ = git::checkout_paths(&target_root, &plan.target_relative);
+                results.push(json!({"name": name, "status": "failed", "reason": e.to_string()}));
+            }
+        }
+    }
+
+    if applied.is_empty()
+        || !git::has_staged_changes(&target_root).map_err(|e| AppError::Git(e.to_string()))?
+    {
+        ui::outro(ctx, "nothing promoted")?;
+        emit_json(ctx, &results, None);
+        return Ok(());
+    }
+
+    let names: Vec<String> = applied
+        .iter()
+        .map(|p| match &p.fork {
+            Some((new_name, _)) => new_name.clone(),
+            None => project_cfg.installed[p.index].name.clone(),
+        })
+        .collect();
+    let message = args.message.clone().unwrap_or_else(|| {
+        if names.len() == 1 {
+            format!("add skill: {}", names[0])
+        } else {
+            format!("add skills: {}", names.join(", "))
+        }
+    });
+    let new_sha = git::commit(&target_root, &message).map_err(|e| AppError::Git(e.to_string()))?;
+    if let Err(e) = git::push(&target_root) {
+        if let Err(rollback_err) = git::reset_hard_to_parent(&target_root) {
+            let _ = ui::log_warning(
+                ctx,
+                format!("could not roll back the local commit after push failure: {rollback_err}"),
+            );
+        }
+        return Err(AppError::Git(e.to_string()).into());
+    }
+
+    let installed_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("formatting installation timestamp")?;
+
+    for plan in &applied {
+        let idx = plan.index;
+        let orig_name = project_cfg.installed[idx].name.clone();
+        match &plan.fork {
+            None => {
+                let entry = &mut project_cfg.installed[idx];
+                entry.source_path = plan.target_relative.clone();
+                entry.source_sha = new_sha.clone();
+                entry.library = Some(target.name.clone());
+                entry.library_url = Some(target.url.clone());
+                entry.installed_at = installed_at.clone();
+                ui::log_success(ctx, format!("promoted {orig_name} → `{}`", target.name))?;
+                results.push(json!({
+                    "name": orig_name,
+                    "status": "promoted",
+                    "library": target.name,
+                    "source_sha": new_sha,
+                }));
+            }
+            Some((new_name, new_local_destination)) => {
+                let abs_old = safe_join(&cwd, &project_cfg.installed[idx].destination)?;
+                let abs_new = safe_join(&cwd, new_local_destination)?;
+                project_cfg.installed[idx] = InstalledSkill {
+                    name: new_name.clone(),
+                    source_path: plan.target_relative.clone(),
+                    source_sha: new_sha.clone(),
+                    destination: new_local_destination.clone(),
+                    installed_at: installed_at.clone(),
+                    library: Some(target.name.clone()),
+                    library_url: Some(target.url.clone()),
+                };
+                if abs_old != abs_new {
+                    if let Some(parent) = abs_new.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    if let Err(e) = fs::rename(&abs_old, &abs_new) {
+                        ui::log_warning(
+                            ctx,
+                            format!(
+                                "promoted `{orig_name}` → `{new_name}` in `{}`, but the local rename failed: {e}. `.skills.toml` records the new destination; rename the local folder by hand.",
+                                target.name
+                            ),
+                        )?;
+                    }
+                }
+                ui::log_success(
+                    ctx,
+                    format!("promoted {orig_name} → `{new_name}` in `{}`", target.name),
+                )?;
+                results.push(json!({
+                    "name": orig_name,
+                    "status": "promoted",
+                    "new_name": new_name,
+                    "library": target.name,
+                    "source_sha": new_sha,
+                }));
+            }
+        }
+    }
+    project_config::save(&cwd, &project_cfg)?;
+
+    let promoted = results.iter().filter(|r| r["status"] == "promoted").count();
+    let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let summary = if skipped > 0 {
+        format!("promoted {promoted}, skipped {skipped}")
+    } else {
+        format!("promoted {promoted} skill(s)")
+    };
+    ui::outro(ctx, summary)?;
+    emit_json(ctx, &results, Some((new_sha.as_str(), message.as_str())));
+    Ok(())
+}
+
+/// Resolve a target-library path collision during promotion. Interactive: a
+/// three-way Select; non-interactive: the `--on-divergence` policy, or skip
+/// with a warning when none was given (never clobber by default).
+fn resolve_promotion_collision(
+    ctx: &Context,
+    args: &PushArgs,
+    name: &str,
+    target_name: &str,
+) -> Result<DivergenceChoice> {
+    if let Some(policy) = args.on_divergence {
+        return Ok(DivergenceChoice::from(policy));
+    }
+    if !ctx.interactive {
+        ui::log_warning(
+            ctx,
+            format!(
+                "{name} already exists in `{target_name}` and no --on-divergence policy was given; skipping"
+            ),
+        )?;
+        return Ok(DivergenceChoice::Skip);
+    }
+    Ok(select(format!(
+        "`{name}` already exists in `{target_name}` — what do you want to do?"
+    ))
+    .item(
+        DivergenceChoice::Overwrite,
+        "Overwrite",
+        "replace the target library's version with your local content",
+    )
+    .item(
+        DivergenceChoice::Fork,
+        "Add as a new skill",
+        "publish under a new name; the existing skill stays untouched",
+    )
+    .item(
+        DivergenceChoice::Skip,
+        "Cancel",
+        "leave the target library untouched",
+    )
+    .interact()?)
+}
+
+/// Pick which installed skills to promote. Any installed skill is eligible
+/// (including those installed from a read-only source — that's the point).
+fn select_for_promotion(
+    args: &PushArgs,
+    ctx: &Context,
+    cwd: &Path,
+    project_cfg: &project_config::ProjectConfig,
+) -> Result<Vec<usize>> {
+    let installed = &project_cfg.installed;
+    if args.all {
+        return Ok((0..installed.len()).collect());
+    }
+    if !args.skills.is_empty() {
+        let mut chosen = Vec::with_capacity(args.skills.len());
+        for name in &args.skills {
+            let idx = installed
+                .iter()
+                .position(|i| &i.name == name)
+                .ok_or_else(|| AppError::Config(format!("no installed skill named `{name}`")))?;
+            chosen.push(idx);
+        }
+        return Ok(chosen);
+    }
+    if !args.tags.is_empty() {
+        let matched: Vec<usize> = installed
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                let tags = skill::read_tags(&cwd.join(&i.destination).join("SKILL.md"))
+                    .unwrap_or_default();
+                matches_tags(&tags, &args.tags, args.all_tags)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        if matched.is_empty() {
+            return Err(AppError::Config(format!(
+                "no installed skill matches the requested tag(s): {}",
+                args.tags.join(", ")
+            ))
+            .into());
+        }
+        if !ctx.interactive {
+            return Ok(matched);
+        }
+        let mut prompt = multiselect("Skills to promote (tag-filtered)").required(true);
+        for idx in &matched {
+            prompt = prompt.item(*idx, &installed[*idx].name, "");
+        }
+        return prompt.interact();
+    }
+    if !ctx.interactive {
+        return Err(AppError::Config(
+            "no skills selected — pass --skill <name> (repeatable), --tag <name>, or --all".into(),
+        )
+        .into());
+    }
+    let mut prompt = multiselect("Skills to promote").required(true);
+    for (idx, i) in installed.iter().enumerate() {
+        let hint = i.library.as_deref().unwrap_or("default");
+        prompt = prompt.item(idx, &i.name, hint);
+    }
+    prompt.interact()
+}
+
 fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
     if !ctx.json {
         return;
     }
+    let promoted = results.iter().filter(|r| r["status"] == "promoted").count();
     let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
     let forked = results.iter().filter(|r| r["status"] == "forked").count();
     let pr_opened = results
@@ -973,6 +1363,7 @@ fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
         "summary": {
             "pushed": pushed,
             "forked": forked,
+            "promoted": promoted,
             "pr_opened": pr_opened,
             "skipped": skipped,
         },
