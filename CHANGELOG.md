@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-12
+
+The multi-remote model (Phase 10): manage **several** skill libraries, each with an access level, across GitHub, GitLab, and self-hosted git, with the full round-trip — install, pull, push, promote, and open a PR/MR. A single configured library keeps working with **zero new flags**; everything below is opt-in once you add a second library. Shipped as six independently audited steps (10A–10F).
+
+### Added
+
+- **Multiple libraries.** `config.toml` now holds an array of libraries, each with a `name`, `url`, and an **access level** — `read` (consume only), `write` (commit directly), or `pr` (push a branch and open a PR/MR). New `skillctl library add <name> <url> [--access …] [--default]`, `library list`, `library remove`, and `library set-default`. `skillctl init <url>` is now sugar for "add the first library and mark it default". Exactly one library is the default; added libraries default to `--access read` so you can't push to a third-party source by accident.
+- **Any git host, over HTTPS or SSH.** Library URLs accept GitHub, GitLab, and self-hosted instances in `https://host/owner/repo`, `git@host:owner/repo`, and `ssh://git@host[:port]/owner/repo` forms (no host allowlist — it's your own config). The cache directory name is now host-aware and collision-free.
+- **Consume from many** (`add` / `list`). `--from <name>` reads from a named library; `--from all` spans every configured library (source shown per skill, with a nested `--json` shape). The interactive `add` picker grows a **tab per library** (←/→ to switch) when more than one is configured; selections accumulate across tabs into one install. On a name/destination clash across libraries, the later skill is suffixed `-<library>` so both land distinctly.
+- **Content security audit.** New `skillctl audit [--skill|--all] [--fail-on <severity>]` scans a skill's `SKILL.md` and bundled files for dangerous patterns (credentials, obfuscation, risky shell, dynamic code, prompt-injection) and reports a verdict. `add` runs it automatically (warn-only by default; `--fail-on <severity>` blocks; `--no-audit` skips). New exit code `5` for an audit threshold breach.
+- **Provenance-following `pull` and `push`.** Each installed skill records which library it came from; `pull` refreshes it from **that** library and `push` writes it back **there** (a run can touch several libraries — one commit per library). A skill whose source library is no longer configured is listed and skipped.
+- **`detect --to <name>`.** Choose which writable library new local skills are added to — the sole writable library by default, a `--to` name, or an interactive pick when several are configured.
+- **`push --to <name>` — promotion.** Publish the selected skills into a writable library regardless of where they came from (and rewrite their provenance to it) — the way to contribute a skill installed from a read-only source into your own or a team library. On a path collision in the target, the existing `--on-divergence` vocabulary applies: `overwrite`, `fork` (add as a new skill), or `skip` (the default — never clobbers without consent).
+- **`push` to a `pr`-access library opens a PR/MR.** Instead of committing to the default branch, push a `skillctl/<slug>` branch and open a pull request (`gh`) or merge request (`glab`); the URL surfaces in the outro and JSON (`pr_url`). New `--pr-title` and `--yes`; interactive runs show an editable title and a confirm before anything is pushed. No host token is stored — it reuses your existing `gh`/`glab` auth; unsupported hosts get a clear "branch pushed, open it manually" message.
+
+### Changed
+
+- **`config.toml` migrates automatically** from the legacy single-`[library]` form to the new `[[library]]` array, in memory on read and persisted on the next config-writing command — no surprise rewrites. Each `.skills.toml` entry gains optional `library` + `library_url` provenance fields (absent ⇒ the default library, so old manifests keep working).
+- **One-time cache re-clone.** Because the cache directory name became host-aware, existing single-library users get a single re-clone on the first command after upgrading (the cache is disposable). `init` / `library add` recreate it.
+
+### Security
+
+- **Cross-library installs are untrusted by default.** Installing from any non-default (third-party) library makes the content audit **mandatory** — `--no-audit` is refused there (still warn-only unless you add `--fail-on`). Your own default/primary library is unaffected.
+- **Provenance routing is fail-closed.** Push/pull match a skill to its library by normalized URL; a `.skills.toml` whose `library_url` is present but unparseable resolves to *no* library (and is rejected at load) rather than falling back to the rename-able name alias — so a crafted manifest can't route a foreign skill onto the wrong cache.
+- **One repository per library.** Two configured libraries pointing at the same repo (e.g. a `read` and a `write` spelling of one URL) are rejected at load and at `library add`, closing an access-gate bypass where a skill's write target would otherwise depend on config order.
+- **Hardened git/PR surface.** The git transport allowlist is pinned to https+ssh (alternate transports like `ext::`/`file://` can never run); `--message`/`--pr-title` reject control characters (no forged commit trailers) before any commit; `gh`/`glab` are invoked with argv (no shell), and their output is scrubbed of credential tokens.
+
+Every step ran the project's standard pre-release security-audit pass; findings (1 HIGH access-gate bypass, several MEDIUM/LOW) were fixed before each commit. `cargo test`: 237 pass; clippy clean.
+
 ## [0.2.0] - 2026-05-27
 
 ### Added
