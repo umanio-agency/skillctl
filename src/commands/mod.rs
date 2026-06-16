@@ -9,3 +9,4 @@ pub mod pull;
 pub mod push;
 pub mod remove;
 pub mod shared;
+pub mod tag;

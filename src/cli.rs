@@ -46,6 +46,29 @@ pub enum Command {
     Library(LibraryCommand),
     /// Scan skills' content for dangerous patterns and report a verdict.
     Audit(AuditArgs),
+    /// Add or remove tags on a project skill's SKILL.md frontmatter.
+    #[command(subcommand)]
+    Tag(TagCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagCommand {
+    /// Add one or more tags to a skill.
+    Add(TagEditArgs),
+    /// Remove one or more tags from a skill.
+    Remove(TagEditArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct TagEditArgs {
+    /// Skill to edit, by name — must exist in the current project.
+    #[arg(long, value_name = "NAME")]
+    pub skill: String,
+
+    /// Tag(s) to add or remove. Each must be a simple token (no commas,
+    /// brackets, or quotes).
+    #[arg(value_name = "TAG", required = true)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -118,11 +141,19 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Library to install from, by name (defaults to the default library).
-    /// Installing from a non-default (third-party) library forces the content
-    /// audit on — `--no-audit` is refused in that case.
-    #[arg(long, value_name = "NAME")]
+    /// Library to install from, by name (defaults to the default library), or
+    /// a git URL / `github:owner/repo` shorthand to install ad-hoc from a
+    /// remote source that isn't a configured library. `--from all` spans every
+    /// configured library. Installing from any non-default source forces the
+    /// content audit on — `--no-audit` is refused in that case.
+    #[arg(long, value_name = "NAME|URL")]
     pub from: Option<String>,
+
+    /// After an ad-hoc `--from <url>` install, also register the source as a
+    /// read-access library under this name, so `skillctl pull` can track it
+    /// later. Ignored when `--from` names an already-configured library.
+    #[arg(long, value_name = "NAME")]
+    pub save_as: Option<String>,
 
     /// Skill name to install. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]

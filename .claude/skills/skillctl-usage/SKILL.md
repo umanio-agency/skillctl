@@ -113,7 +113,8 @@ skillctl add --from all --tag <tag> --dest <path>         # install matching ski
 
 | Flag | Purpose | Required in non-interactive |
 |---|---|---|
-| `--from <name>` | Install from a named library instead of the default. `--from all` installs matching skills from **every** configured library in one run (non-interactive: requires a selection — `--all`/`--skill`/`--tag`). Installing from any non-default library forces the content audit on (see below). | No |
+| `--from <name\|url>` | Install from a named library instead of the default. **A git URL or `github:owner/repo` / `gitlab:owner/repo` shorthand** installs ad-hoc from a remote source that isn't a configured library (see below). `--from all` installs matching skills from **every** configured library in one run (non-interactive: requires a selection — `--all`/`--skill`/`--tag`). Installing from any non-default source forces the content audit on. | No |
+| `--save-as <name>` | Only with an ad-hoc `--from <url>`: also register the source as a `read`-access library under this name, so `skillctl pull` can track it later. Ignored when `--from` names an already-configured library. | No |
 | `--skill <name>` | Install a specific skill (repeatable). Mutually exclusive with `--all` and `--tag`. | Yes, unless `--all` or `--tag` |
 | `--all` | Install every skill in the library. Mutually exclusive with `--skill` and `--tag`. | Yes, unless `--skill` or `--tag` |
 | `--tag <tag>` | Install every skill carrying this tag (repeatable). Default semantics is union (any of the given tags). Mutually exclusive with `--skill` and `--all`. | Yes, unless `--skill` or `--all` |
@@ -126,6 +127,8 @@ skillctl add --from all --tag <tag> --dest <path>         # install matching ski
 Before anything is copied, `add` runs a content security audit (see `skillctl audit`) on each selected skill. By default it is **warn-only** (findings are logged, the install proceeds); under `--json` each installed skill's result carries an `"audit_verdict"` field (`safe`/`caution`/`warning`/`dangerous`) so a non-interactive caller still sees the signal. Pass `--fail-on <severity>` to block, or `--no-audit` to skip the scan entirely.
 
 When installing from a **non-default library** (`--from <name>` where `<name>` isn't the default, or `--from all` while any non-default library is configured), the content is untrusted third-party material, so the audit is **mandatory**: `--no-audit` is refused (exit 2). It is still warn-only unless you add `--fail-on`. Installs from the default library are unaffected.
+
+**Ad-hoc remote install** (`--from <url>`): `skillctl add --from github:owner/repo --skill foo --dest .claude/skills` clones the repo into the cache, audits its content (**mandatory** — `--no-audit` refused), and installs the selected skills with their remote-URL provenance. By default the source stays **ephemeral** — recorded in `.skills.toml` by URL but not added to `config.toml`, so `pull`/`push` skip it (it's a one-shot install). To keep tracking it, pass `--save-as <name>` (or accept the interactive "keep as a library?" offer) and it's registered as a `read` library. If the URL already matches a configured library, `--from <url>` simply installs from that library. Accepts the `github:`/`gitlab:` shorthand and full `https://`/`git@`/`ssh://` URLs; installs from the default branch HEAD.
 
 With `--from all`, the default library is installed first and keeps the skill's bare name; if another library offers a skill whose name (or destination folder) is already taken, that install is suffixed `-<library>` (e.g. `deploy` from `personal` + `deploy-team` from `team`), so both land with distinct names, folders, and provenance. The JSON `results[]` entries carry a `library` field naming the source.
 
@@ -273,6 +276,21 @@ skillctl --json audit
 | `--fail-on <info\|warning\|critical>` | Exit with code 5 if any finding reaches this severity. Without it, `audit` always exits 0. | No |
 
 `audit` is **read-only** — it scans the `SKILL.md` and any bundled files of each skill discovered in the current project and reports a per-skill verdict (`safe` / `caution` / `warning` / `dangerous`). Categories: `credentials` (embedded keys/tokens — critical), `obfuscation` (long base64 / hex-escape blobs — warning), `shell` (`rm -rf`, `curl|sh` — warning/info), `dynamic-code` (`eval(` — info), and `prompt-injection` (instruction-override / conceal-from-user / exfiltration phrasings — warning). It is a heuristic advisory aid, not a guarantee. The same scan gates `skillctl add` (see above). The `--json` shape is `{ "command": "audit", "skills": [ { "name", "verdict", "findings": [ { "severity", "category", "label", "file", "line", "snippet" } ] } ], "summary": { "scanned", "worst_severity" } }`.
+
+### `skillctl tag` — edit a skill's tags
+
+```sh
+skillctl tag add <tag> [<tag> …] --skill <name>       # add tag(s)
+skillctl tag remove <tag> [<tag> …] --skill <name>    # remove tag(s)
+skillctl --json tag add code-review --skill my-skill
+```
+
+| Flag / arg | Purpose |
+|---|---|
+| `<tag>…` | One or more tags to add/remove (positional, required). Each must be a simple token — no `,` `[` `]` `"` `'` or whitespace beyond a plain space. |
+| `--skill <name>` | The skill to edit, by name. Must exist in the current project; errors if unknown or if two skills share the name. |
+
+`skillctl tag` rewrites the `tags:` line in the named skill's `SKILL.md` frontmatter — **project-local**, no git or network (like `remove`). `add` unions the new tags onto the existing set (de-duplicated); `remove` drops them; removing the last tag deletes the `tags:` field. Everything else in the file (other frontmatter keys, the body, line endings) is preserved, and the write is atomic. Because `push`/`pull`/`list` read tags from the local `SKILL.md`, a retag takes effect immediately and propagates to the library on the next `push`. The `--json` shape is `{ "command": "tag", "skill": "…", "tags": ["…"], "changed": true|false }`.
 
 ## Skill identity
 
