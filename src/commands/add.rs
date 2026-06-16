@@ -1286,10 +1286,7 @@ mod tests {
 
     #[test]
     fn expand_remote_source_expands_shorthands_only() {
-        assert_eq!(
-            expand_remote_source("github:o/r"),
-            "https://github.com/o/r"
-        );
+        assert_eq!(expand_remote_source("github:o/r"), "https://github.com/o/r");
         assert_eq!(
             expand_remote_source("gitlab:g/s/p"),
             "https://gitlab.com/g/s/p"

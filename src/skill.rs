@@ -346,6 +346,138 @@ pub fn read_tags(skill_md: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Rewrite a SKILL.md's `tags:` frontmatter to exactly `new_tags`, preserving
+/// every other byte of the file (other frontmatter keys, the body, and the
+/// line-ending style). An existing inline (`tags: [..]`) or block (`tags:\n  -
+/// x`) representation is replaced in place with a canonical inline `tags: [a,
+/// b, c]`; with no existing `tags:`, one is inserted just before the closing
+/// `---`. Empty `new_tags` drops the field. Errors if the file has no
+/// frontmatter (we won't guess where metadata belongs). The write is atomic
+/// (temp + rename), so a crash mid-write never truncates the SKILL.md.
+pub fn set_tags(skill_md: &Path, new_tags: &[String]) -> Result<()> {
+    let raw = read_skill_md_bounded(skill_md)?;
+    let (bom, body) = match raw.strip_prefix('\u{feff}') {
+        Some(rest) => (true, rest),
+        None => (false, raw.as_str()),
+    };
+    let newline = if body.contains("\r\n") { "\r\n" } else { "\n" };
+
+    // Keep each line's trailing newline so concatenation round-trips exactly.
+    let segments: Vec<&str> = body.split_inclusive('\n').collect();
+    if segments.first().map(|s| s.trim()) != Some("---") {
+        return Err(anyhow::anyhow!(
+            "{} has no `---` frontmatter block to edit; add a `tags:` field by hand",
+            skill_md.display()
+        ));
+    }
+    let close = segments
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(MAX_FRONTMATTER_LINES)
+        .find(|(_, s)| s.trim() == "---")
+        .map(|(i, _)| i)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} has an unterminated frontmatter block",
+                skill_md.display()
+            )
+        })?;
+
+    // Locate the column-0 `tags:` key (as the parser reads it) plus any
+    // block-form `- item` lines that follow it.
+    let mut tags_start = None;
+    let mut tags_end = close; // exclusive
+    for (i, seg) in segments.iter().enumerate().take(close).skip(1) {
+        if let Some(rest) = seg.trim_end_matches(['\n', '\r']).strip_prefix("tags:") {
+            tags_start = Some(i);
+            let mut end = i + 1;
+            if rest.trim().is_empty() {
+                while end < close {
+                    let item = segments[end].trim();
+                    if item == "-" || item.starts_with("- ") {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            tags_end = end;
+            break;
+        }
+    }
+
+    let canonical = if new_tags.is_empty() {
+        None
+    } else {
+        let inner = new_tags
+            .iter()
+            .map(|t| format_tag(t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("tags: [{inner}]{newline}"))
+    };
+
+    // With no existing `tags:`, insert at the closing fence; otherwise replace
+    // the existing representation in place.
+    let insert_at = tags_start.unwrap_or(close);
+    let remove_end = if tags_start.is_some() {
+        tags_end
+    } else {
+        close
+    };
+
+    let mut out = String::with_capacity(raw.len() + 32);
+    if bom {
+        out.push('\u{feff}');
+    }
+    for (i, seg) in segments.iter().enumerate() {
+        if i == insert_at {
+            if let Some(c) = &canonical {
+                out.push_str(c);
+            }
+        }
+        if i >= insert_at && i < remove_end {
+            continue;
+        }
+        out.push_str(seg);
+    }
+
+    atomic_write(skill_md, out.as_bytes())
+}
+
+/// Format one tag for a canonical inline `tags: [...]` list: bare when it's a
+/// simple token, double-quoted when it contains a structural or whitespace
+/// character so it round-trips through `parse_tags_inline`.
+fn format_tag(t: &str) -> String {
+    let needs_quote = t.is_empty()
+        || t.chars()
+            .any(|c| matches!(c, ',' | '[' | ']' | '"' | '\'') || c.is_whitespace());
+    if needs_quote {
+        format!("\"{}\"", t.replace('"', "\\\""))
+    } else {
+        t.to_string()
+    }
+}
+
+/// Write `bytes` to `path` atomically: stage in a sibling temp file, then
+/// rename over the target so a crash never leaves a half-written SKILL.md.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".skillctl-tags.tmp.{pid}.{nanos}"));
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
+    }
+    Ok(())
+}
+
 /// Strip a balanced pair of wrapping quotes (`"..."` or `'...'`) from a
 /// scalar value. Mismatched quotes (`"foo'`) are left as-is — silently
 /// stripping them used to mask malformed input and let mixed-quote values
@@ -452,6 +584,77 @@ mod tests {
         let raw = "---\ntags: solo\n---\n";
         let (_, _, tags) = parse_frontmatter(raw);
         assert_eq!(tags, vec!["solo".to_string()]);
+    }
+
+    fn write_set_read(initial: &str, new_tags: &[&str]) -> (String, Vec<String>) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("SKILL.md");
+        std::fs::write(&p, initial).unwrap();
+        let owned: Vec<String> = new_tags.iter().map(|s| s.to_string()).collect();
+        set_tags(&p, &owned).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        let tags = read_tags(&p).unwrap();
+        (raw, tags)
+    }
+
+    #[test]
+    fn set_tags_replaces_inline_and_preserves_other_lines() {
+        let initial = "---\nname: foo\ndescription: d\ntags: [old]\n---\n\n# Body\nkeep me\n";
+        let (raw, tags) = write_set_read(initial, &["a", "b"]);
+        assert_eq!(tags, vec!["a".to_string(), "b".to_string()]);
+        assert!(raw.contains("tags: [a, b]"), "got:\n{raw}");
+        assert!(raw.contains("name: foo") && raw.contains("description: d"));
+        assert!(
+            raw.contains("# Body\nkeep me\n"),
+            "body must survive:\n{raw}"
+        );
+        assert!(!raw.contains("[old]"));
+    }
+
+    #[test]
+    fn set_tags_replaces_block_form() {
+        let initial = "---\nname: foo\ntags:\n  - x\n  - y\n---\nbody\n";
+        let (raw, tags) = write_set_read(initial, &["z"]);
+        assert_eq!(tags, vec!["z".to_string()]);
+        assert!(raw.contains("tags: [z]"), "got:\n{raw}");
+        // The old block items are gone and the body is intact.
+        assert!(!raw.contains("- x") && !raw.contains("- y"));
+        assert!(raw.contains("name: foo") && raw.ends_with("body\n"));
+    }
+
+    #[test]
+    fn set_tags_inserts_when_absent() {
+        let initial = "---\nname: foo\ndescription: d\n---\nbody\n";
+        let (raw, tags) = write_set_read(initial, &["new"]);
+        assert_eq!(tags, vec!["new".to_string()]);
+        // Inserted inside the frontmatter, before the closing fence.
+        let fm_end = raw.find("\n---\n").unwrap();
+        assert!(raw[..fm_end].contains("tags: [new]"), "got:\n{raw}");
+    }
+
+    #[test]
+    fn set_tags_empty_removes_the_field() {
+        let initial = "---\nname: foo\ntags: [a, b]\n---\nbody\n";
+        let (raw, tags) = write_set_read(initial, &[]);
+        assert!(tags.is_empty());
+        assert!(!raw.contains("tags:"), "tags field should be gone:\n{raw}");
+        assert!(raw.contains("name: foo") && raw.contains("body"));
+    }
+
+    #[test]
+    fn set_tags_quotes_values_needing_it() {
+        let initial = "---\ntags: [a]\n---\n";
+        let (raw, tags) = write_set_read(initial, &["hello world", "simple"]);
+        assert!(raw.contains("\"hello world\""), "got:\n{raw}");
+        assert_eq!(tags, vec!["hello world".to_string(), "simple".to_string()]);
+    }
+
+    #[test]
+    fn set_tags_errors_without_frontmatter() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().join("SKILL.md");
+        std::fs::write(&p, "# no frontmatter here\n").unwrap();
+        assert!(set_tags(&p, &["a".to_string()]).is_err());
     }
 
     #[test]

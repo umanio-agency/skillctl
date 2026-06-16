@@ -46,6 +46,29 @@ pub enum Command {
     Library(LibraryCommand),
     /// Scan skills' content for dangerous patterns and report a verdict.
     Audit(AuditArgs),
+    /// Add or remove tags on a project skill's SKILL.md frontmatter.
+    #[command(subcommand)]
+    Tag(TagCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TagCommand {
+    /// Add one or more tags to a skill.
+    Add(TagEditArgs),
+    /// Remove one or more tags from a skill.
+    Remove(TagEditArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct TagEditArgs {
+    /// Skill to edit, by name — must exist in the current project.
+    #[arg(long, value_name = "NAME")]
+    pub skill: String,
+
+    /// Tag(s) to add or remove. Each must be a simple token (no commas,
+    /// brackets, or quotes).
+    #[arg(value_name = "TAG", required = true)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
