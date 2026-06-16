@@ -277,6 +277,21 @@ skillctl --json audit
 
 `audit` is **read-only** — it scans the `SKILL.md` and any bundled files of each skill discovered in the current project and reports a per-skill verdict (`safe` / `caution` / `warning` / `dangerous`). Categories: `credentials` (embedded keys/tokens — critical), `obfuscation` (long base64 / hex-escape blobs — warning), `shell` (`rm -rf`, `curl|sh` — warning/info), `dynamic-code` (`eval(` — info), and `prompt-injection` (instruction-override / conceal-from-user / exfiltration phrasings — warning). It is a heuristic advisory aid, not a guarantee. The same scan gates `skillctl add` (see above). The `--json` shape is `{ "command": "audit", "skills": [ { "name", "verdict", "findings": [ { "severity", "category", "label", "file", "line", "snippet" } ] } ], "summary": { "scanned", "worst_severity" } }`.
 
+### `skillctl tag` — edit a skill's tags
+
+```sh
+skillctl tag add <tag> [<tag> …] --skill <name>       # add tag(s)
+skillctl tag remove <tag> [<tag> …] --skill <name>    # remove tag(s)
+skillctl --json tag add code-review --skill my-skill
+```
+
+| Flag / arg | Purpose |
+|---|---|
+| `<tag>…` | One or more tags to add/remove (positional, required). Each must be a simple token — no `,` `[` `]` `"` `'` or whitespace beyond a plain space. |
+| `--skill <name>` | The skill to edit, by name. Must exist in the current project; errors if unknown or if two skills share the name. |
+
+`skillctl tag` rewrites the `tags:` line in the named skill's `SKILL.md` frontmatter — **project-local**, no git or network (like `remove`). `add` unions the new tags onto the existing set (de-duplicated); `remove` drops them; removing the last tag deletes the `tags:` field. Everything else in the file (other frontmatter keys, the body, line endings) is preserved, and the write is atomic. Because `push`/`pull`/`list` read tags from the local `SKILL.md`, a retag takes effect immediately and propagates to the library on the next `push`. The `--json` shape is `{ "command": "tag", "skill": "…", "tags": ["…"], "changed": true|false }`.
+
 ## Skill identity
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.
