@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-16
+
+Two additions on top of the v0.3.0 multi-remote model. Both are backward-compatible (new surface only).
+
+### Added
+
+- **Ad-hoc install from a remote source** — `skillctl add --from <url>` installs skills directly from a git repo that isn't a configured library, where `<url>` is a full URL or a `github:owner/repo` / `gitlab:owner/repo` shorthand. It's the one-shot "try a skill from that repo" path, complementing the persistent `library add` + `--from <name>` flow. A configured library name always wins (so this never shadows one), and a URL that matches an existing library is treated as an alias for it. The source is cloned into the cache and its content is **always audited** (third-party by definition — `--no-audit` is refused). By default the install is **ephemeral** — recorded in `.skills.toml` by URL but not added to `config.toml`, so `pull`/`push` skip it. Pass `--save-as <name>`, or accept the interactive "keep as a library?" offer, to register it as a `read`-access library that `pull` can track afterward. (A curated public registry and `#ref` pinning are not included.)
+- **`skillctl tag add <tag>… --skill <name>`** / **`skillctl tag remove …`** — add or remove tags on a project skill's `SKILL.md` frontmatter from the CLI, instead of hand-editing YAML. Project-local (no git or network, like `remove`): it rewrites the `tags:` field in place — an existing inline (`tags: [a, b]`) or block form becomes a canonical `tags: [a, b, c]`, one is inserted if absent, and removing the last tag drops the field — while preserving every other byte of the file (other frontmatter keys, the body, BOM, and line endings). The write is atomic. Because tags are read from the local `SKILL.md`, a retag takes effect immediately and propagates to the library on the next `push`.
+
+### Security
+
+- A remote `add --from <url>` install can never skip the content audit (`--no-audit` is refused, and the audit also runs unconditionally on the install path). Inline credentials in a `--from` URL are kept out of the stored provenance, logs, and JSON (only a sanitised display URL is recorded).
+- `skillctl tag` values are restricted to simple tokens (no `,` `[` `]` `"` `'` or non-space whitespace, including Unicode line/paragraph separators) so they can't break the frontmatter or smuggle terminal escapes. The frontmatter rewrite only ever touches lines inside the `---` fences, replaces a symlinked `SKILL.md` rather than following it, and is written atomically.
+
+Both additions went through the project's standard pre-release security-audit pass; findings (all LOW) were fixed or accepted. `cargo test`: 246 pass; clippy clean.
+
 ## [0.3.0] - 2026-06-12
 
 The multi-remote model (Phase 10): manage **several** skill libraries, each with an access level, across GitHub, GitLab, and self-hosted git, with the full round-trip — install, pull, push, promote, and open a PR/MR. A single configured library keeps working with **zero new flags**; everything below is opt-in once you add a second library. Shipped as six independently audited steps (10A–10F).
