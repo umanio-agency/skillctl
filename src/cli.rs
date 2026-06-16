@@ -118,11 +118,19 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Library to install from, by name (defaults to the default library).
-    /// Installing from a non-default (third-party) library forces the content
-    /// audit on — `--no-audit` is refused in that case.
-    #[arg(long, value_name = "NAME")]
+    /// Library to install from, by name (defaults to the default library), or
+    /// a git URL / `github:owner/repo` shorthand to install ad-hoc from a
+    /// remote source that isn't a configured library. `--from all` spans every
+    /// configured library. Installing from any non-default source forces the
+    /// content audit on — `--no-audit` is refused in that case.
+    #[arg(long, value_name = "NAME|URL")]
     pub from: Option<String>,
+
+    /// After an ad-hoc `--from <url>` install, also register the source as a
+    /// read-access library under this name, so `skillctl pull` can track it
+    /// later. Ignored when `--from` names an already-configured library.
+    #[arg(long, value_name = "NAME")]
+    pub save_as: Option<String>,
 
     /// Skill name to install. Repeatable. Mutually exclusive with --all and --tag.
     #[arg(long = "skill", value_name = "NAME", conflicts_with_all = ["all", "tags"])]

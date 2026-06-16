@@ -55,6 +55,15 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     let cfg = config::load()?;
     let has_selection = args.all || !args.skills.is_empty() || !args.tags.is_empty();
     let from_all = args.from.as_deref() == Some("all");
+
+    // `--from <url>` (a git URL or `github:`/`gitlab:` shorthand that isn't an
+    // already-configured library name) installs ad-hoc from a remote source.
+    // A known library name always wins, so this can't shadow a configured lib.
+    if let Some(from) = args.from.as_deref() {
+        if !from_all && cfg.by_name(from).is_none() && looks_like_remote_source(from) {
+            return run_remote(&args, ctx, &cfg, from);
+        }
+    }
     // Interactive cross-library browsing via tabs: an explicit `--from all`, or
     // a plain `add` when several libraries are configured — both only when no
     // selection flag pins the choice. `--from <name>` always targets one
@@ -534,6 +543,196 @@ fn run_tabbed(args: &AddArgs, ctx: &Context, cfg: &config::Config) -> Result<()>
 /// audit the whole span (atomic on `--fail-on`), copy each skill, and record
 /// provenance. Used by both flag-driven `--from all` and the interactive
 /// library-tabs path. Cache + project locks are held by the caller.
+/// True if a `--from` value looks like a remote git source rather than a
+/// configured library name: a `github:`/`gitlab:` shorthand or an explicit
+/// HTTPS / SSH / scp URL. Library names never carry a scheme or `@host:` shape.
+fn looks_like_remote_source(s: &str) -> bool {
+    s.starts_with("github:")
+        || s.starts_with("gitlab:")
+        || s.starts_with("https://")
+        || s.starts_with("ssh://")
+        || s.starts_with("git@")
+        || s.contains("://")
+}
+
+/// Expand a `github:owner/repo` / `gitlab:owner/repo` shorthand to a full HTTPS
+/// URL; pass anything else through unchanged for `host::parse_remote_url`.
+fn expand_remote_source(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("github:") {
+        format!("https://github.com/{rest}")
+    } else if let Some(rest) = s.strip_prefix("gitlab:") {
+        format!("https://gitlab.com/{rest}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Default library name for an ad-hoc remote source: the last path segment,
+/// reduced to a filesystem/identifier-safe form.
+fn derive_library_name(path: &str) -> String {
+    let last = path.rsplit('/').next().unwrap_or(path);
+    let name: String = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        "library".to_string()
+    } else {
+        name
+    }
+}
+
+/// Ad-hoc install from a remote git source passed to `--from` (a full URL or a
+/// `github:`/`gitlab:` shorthand) that isn't a configured library. The source
+/// is cloned into the URL-keyed cache (refreshed if already present); its
+/// content is **always** audited (third-party by definition — `--no-audit` is
+/// refused); and the selected skills are installed with URL provenance.
+/// Optionally the source is registered as a `read` library (`--save-as`, or an
+/// interactive offer) so `skillctl pull` can track it afterward.
+fn run_remote(args: &AddArgs, ctx: &Context, cfg: &config::Config, source: &str) -> Result<()> {
+    if args.no_audit {
+        return Err(AppError::Config(
+            "refusing --no-audit when installing from a remote URL: third-party content is always audited; drop --no-audit".into(),
+        )
+        .into());
+    }
+
+    let expanded = expand_remote_source(source);
+    let remote = crate::host::parse_remote_url(&expanded)
+        .map_err(|e| AppError::Config(format!("invalid source `{source}`: {e}")))?;
+    let display_url = config::sanitize_url_for_display(&expanded);
+
+    // If the URL resolves to an already-configured library, install from it as
+    // that library (its own name/access/provenance) — `--from <url>` becomes an
+    // alias for `--from <name>`, and we never re-save it.
+    let existing = cfg.libraries.iter().find(|l| {
+        crate::host::parse_remote_url(&l.url)
+            .map(|r| r.normalized == remote.normalized)
+            .unwrap_or(false)
+    });
+
+    let cache_path =
+        config::library_cache_path(&display_url).map_err(|e| AppError::Config(e.to_string()))?;
+    let existed = cache_path.exists();
+    if !existed {
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating cache dir {}", parent.display()))?;
+        }
+        ui::log_info(ctx, format!("cloning {display_url} …"))?;
+        git::clone(&expanded, &cache_path).map_err(|e| AppError::Git(e.to_string()))?;
+    }
+    let _cache_lock = lock::acquire_exclusive(&cache_path, "library cache")?;
+    if existed {
+        if let Err(e) = git::fetch_and_fast_forward(&cache_path) {
+            ui::log_warning(
+                ctx,
+                format!("could not refresh {display_url} ({e}); using cached version"),
+            )?;
+        }
+    }
+
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
+
+    let discovered = skill::discover(&cache_path, false)?;
+    for w in &discovered.warnings {
+        ui::log_warning(ctx, w)?;
+    }
+    let skills = discovered.skills;
+    if skills.is_empty() {
+        ui::outro(ctx, format!("no skills found at {display_url}"))?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    let selected = select_skills(args, ctx, &skills)?;
+    if selected.is_empty() {
+        ui::outro(ctx, "no skills selected")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
+
+    // Decide which library this install is recorded under, and whether to
+    // persist it as a read-access source so `pull` can track it later.
+    let (lib, save) = if let Some(e) = existing {
+        ((*e).clone(), false)
+    } else if let Some(name) = &args.save_as {
+        crate::sanitize::validate_identifier("--save-as", name)?;
+        (
+            config::Library {
+                name: name.clone(),
+                url: display_url.clone(),
+                access: config::Access::Read,
+                default: false,
+            },
+            true,
+        )
+    } else if ctx.interactive
+        && cliclack::confirm(format!(
+            "Keep {display_url} as a library to pull updates from later?"
+        ))
+        .interact()?
+    {
+        let default_name = derive_library_name(&remote.path);
+        let name: String = input("Library name")
+            .default_input(&default_name)
+            .validate(|s: &String| crate::sanitize::validate_identifier("library name", s.trim()))
+            .interact()?;
+        (
+            config::Library {
+                name: name.trim().to_string(),
+                url: display_url.clone(),
+                access: config::Access::Read,
+                default: false,
+            },
+            true,
+        )
+    } else {
+        (
+            config::Library {
+                name: derive_library_name(&remote.path),
+                url: display_url.clone(),
+                access: config::Access::Read,
+                default: false,
+            },
+            false,
+        )
+    };
+
+    // Persist the library BEFORE the install closes the UI (its outro/JSON is
+    // emitted by install_multi_source). A duplicate name is a soft failure.
+    if save {
+        let outcome: Result<()> = (|| {
+            let mut cfg2 = config::load()?;
+            cfg2.add_library(lib.clone(), false)?;
+            config::save(&cfg2)?;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                ui::log_success(ctx, format!("saved library `{}` ({display_url})", lib.name))?
+            }
+            Err(e) => ui::log_warning(
+                ctx,
+                format!("installed, but could not save the library: {e}"),
+            )?,
+        }
+    }
+
+    let selected_tuples: Vec<(Skill, config::Library, PathBuf)> = selected
+        .into_iter()
+        .map(|s| (s, lib.clone(), cache_path.clone()))
+        .collect();
+    install_multi_source(args, ctx, &cwd, selected_tuples)
+}
+
 fn install_multi_source(
     args: &AddArgs,
     ctx: &Context,
@@ -1071,6 +1270,49 @@ fn pick_destination_interactive(existing: Vec<PathBuf>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn looks_like_remote_source_distinguishes_urls_from_names() {
+        assert!(looks_like_remote_source("github:owner/repo"));
+        assert!(looks_like_remote_source("gitlab:group/sub/proj"));
+        assert!(looks_like_remote_source("https://github.com/o/r"));
+        assert!(looks_like_remote_source("ssh://git@h/o/r"));
+        assert!(looks_like_remote_source("git@github.com:o/r.git"));
+        // Plain library names are not remote sources.
+        assert!(!looks_like_remote_source("personal"));
+        assert!(!looks_like_remote_source("team-skills"));
+        assert!(!looks_like_remote_source("all"));
+    }
+
+    #[test]
+    fn expand_remote_source_expands_shorthands_only() {
+        assert_eq!(
+            expand_remote_source("github:o/r"),
+            "https://github.com/o/r"
+        );
+        assert_eq!(
+            expand_remote_source("gitlab:g/s/p"),
+            "https://gitlab.com/g/s/p"
+        );
+        // Full URLs pass through untouched.
+        assert_eq!(
+            expand_remote_source("https://github.com/o/r"),
+            "https://github.com/o/r"
+        );
+        assert_eq!(
+            expand_remote_source("git@github.com:o/r.git"),
+            "git@github.com:o/r.git"
+        );
+    }
+
+    #[test]
+    fn derive_library_name_takes_last_segment() {
+        assert_eq!(derive_library_name("owner/repo"), "repo");
+        assert_eq!(derive_library_name("group/sub/project"), "project");
+        assert_eq!(derive_library_name("repo"), "repo");
+        // Non-identifier characters are reduced to `-`.
+        assert_eq!(derive_library_name("o/weird name!"), "weird-name-");
+    }
 
     #[test]
     fn dest_key_unifies_relative_and_seeded_forms() {
