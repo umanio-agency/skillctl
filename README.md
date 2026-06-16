@@ -13,9 +13,11 @@
 
 A *skill* is any folder containing a `SKILL.md` file — read as instructions and context by agent tools in the [open agent skills ecosystem](https://skills.sh) (Claude Code, Codex, Cursor, OpenCode, and many more). `skillctl` treats skills as first-class artifacts you author, share across projects, and refine over time:
 
-- **One library, many projects.** Keep your skills in a single git repo. Install any subset into a project with `skillctl add`.
-- **Edits where they happen.** Tweak a skill in the heat of a project, then `skillctl push` to send the improvements back to the library.
+- **Libraries, many projects.** Keep your skills in git repos. Install any subset into a project with `skillctl add` — from your personal library, a team library, or ad-hoc from any repo URL.
+- **Edits where they happen.** Tweak a skill in the heat of a project, then `skillctl push` to send the improvements back to the library it came from.
 - **Local skills surfaced.** Wrote something new locally? `skillctl detect` finds it and contributes it upstream.
+- **Many libraries, with access levels.** Configure several libraries — `read` (consume only), `write` (commit directly), or `pr` (push a branch and open a PR/MR) — across GitHub, GitLab, and self-hosted git. `pull`/`push` follow each skill back to the library it came from.
+- **Safety built in.** Skills installed from a non-default source are content-audited (`skillctl audit`); the git transport is locked to HTTPS/SSH; untrusted manifest fields are sanitised.
 - **Conflicts handled.** On divergence, choose overwrite, fork-as-new, fork-locally, or skip — per-skill, per-flow.
 
 The library stays the source of truth; your skills evolve where you use them.
@@ -26,14 +28,16 @@ The library stays the source of truth; your skills evolve where you use them.
 
 | Flow                          | Direction         | Purpose                                                          |
 |-------------------------------|-------------------|------------------------------------------------------------------|
-| `add`                         | library → project | Multi-select install with live filter; records `source_sha`.     |
-| `list`                        | library → ø       | Inventory with tags + descriptions.                              |
-| `push`                        | project → library | Diff local edits and commit them back.                           |
-| `pull`                        | library → project | Refresh installed skills; fork-locally on divergence.            |
-| `detect`                      | project → library | Walk the project for new `SKILL.md` files and contribute them.   |
-| `push --on-divergence fork`   | project → library | Fork as a *new* library skill when local has diverged.           |
+| `add`                         | library → project | Multi-select install with live filter; records provenance + `source_sha`. `--from <name\|url>` picks a library or installs ad-hoc from a repo. |
+| `list`                        | library → ø       | Inventory with tags + descriptions; `--from all` spans every library. |
+| `push`                        | project → library | Diff local edits and commit them back to each skill's own library. `--to` promotes into another writable library. |
+| `pull`                        | library → project | Refresh installed skills from their own library; fork-locally on divergence. |
+| `detect`                      | project → library | Walk the project for new `SKILL.md` files and contribute them (`--to <lib>`). |
+| `library`                     | config            | Add/list/remove configured libraries and set the default.        |
+| `audit`                       | content           | Scan skill content for dangerous patterns and report a verdict.  |
+| `tag`                         | project           | Add/remove tags on a project skill's `SKILL.md` frontmatter.     |
 
-Plus `init` (link a library). Every multi-skill flow supports `--tag` filtering and `--json` for agents.
+Plus `init` (link the first library). Every multi-skill flow supports `--tag` filtering and `--json` for agents. Pushing to a `pr`-access library opens a PR (`gh`) or MR (`glab`) instead of committing directly.
 
 ## Install
 
@@ -94,12 +98,37 @@ The interactive `add` / `push` / `pull` / `detect` show a multi-select with a li
 
 ## Commands
 
-- **`skillctl init <github-url>`** — clone your library into a local cache.
-- **`skillctl list`** — print every skill in the library, with its tags and description.
-- **`skillctl add`** — multi-select skills and copy them into the current project. Recorded in `.skills.toml`.
-- **`skillctl push`** — push local edits back to the library. On a diverged skill, choose between overwrite, fork-as-new, and skip.
-- **`skillctl pull`** — refresh installed skills with library updates. On a diverged skill, choose between overwrite, fork-locally, and skip.
-- **`skillctl detect`** — find local skills not yet declared in `.skills.toml` and add them to the library.
+- **`skillctl init <url>`** — clone your first library into a local cache and mark it the default. Accepts GitHub, GitLab, and self-hosted URLs (HTTPS or SSH).
+- **`skillctl list`** — print every skill in the library, with its tags and description. `--from <name>` lists another library; `--from all` spans every configured one.
+- **`skillctl add`** — multi-select skills and copy them into the current project (recorded in `.skills.toml`). `--from <name>` installs from a named library; `--from <url>` (or `github:owner/repo`) installs ad-hoc from any repo, with `--save-as` to keep it as a library.
+- **`skillctl push`** — push local edits back to each skill's own library. On a diverged skill, choose overwrite, fork-as-new, or skip. `--to <lib>` promotes a skill into another writable library. Pushing to a `pr` library opens a PR/MR.
+- **`skillctl pull`** — refresh installed skills with updates from their own library. On a diverged skill, choose overwrite, fork-locally, or skip.
+- **`skillctl detect`** — find local skills not yet in `.skills.toml` and add them to a chosen writable library (`--to <lib>`).
+- **`skillctl library add|list|remove|set-default`** — manage configured libraries (each `read` / `write` / `pr`).
+- **`skillctl audit`** — scan skill content for dangerous patterns (credentials, obfuscation, risky shell, prompt-injection) and report a verdict.
+- **`skillctl tag add|remove <tag>… --skill <name>`** — edit a project skill's frontmatter tags from the CLI.
+- **`skillctl remove`** — remove installed/local skills from the current project (never touches the library or git).
+
+## Multiple libraries
+
+Beyond the primary library, configure as many as you like — a team library, a read-only upstream you follow, etc. — each with an access level:
+
+```sh
+skillctl library add team https://github.com/acme/skills --access write
+skillctl library add upstream https://gitlab.com/vendor/skills   # defaults to --access read
+skillctl library list
+
+skillctl add --from team --skill deploy        # install from a named library
+skillctl add --from all                        # browse every library (interactive tabs)
+skillctl add --from github:acme/playbook        # ad-hoc from any repo, no config needed
+```
+
+- **`read`** — consume only. **`write`** — `push` commits directly. **`pr`** — `push` opens a PR (`gh`) / MR (`glab`) for review.
+- Each installed skill records which library it came from; `pull` and `push` follow that provenance automatically (a single run can touch several libraries).
+- Installing from any non-default source runs the content audit by default (`--no-audit` is refused for third-party content).
+- `push --to <writable-lib>` promotes a skill installed from a read-only source into your own or a team library.
+
+A single configured library behaves exactly as before — none of this needs new flags until you add a second.
 
 ## Tags
 
@@ -113,19 +142,22 @@ tags: [api, claude, caching]
 ---
 ```
 
-Use `--tag <name>` (repeatable) on `add` / `list` / `push` / `pull` / `detect` to filter, or `--tag <name> --all-tags` for intersection. `skillctl add --tag images-gen --dest .claude/skills` bulk-installs every skill carrying `images-gen`.
+Use `--tag <name>` (repeatable) on `add` / `list` / `push` / `pull` / `detect` to filter, or `--tag <name> --all-tags` for intersection. `skillctl add --tag images-gen --dest .claude/skills` bulk-installs every skill carrying `images-gen`. Edit a skill's tags without hand-writing YAML with `skillctl tag add <tag> --skill <name>` / `skillctl tag remove …`.
 
 ## Non-interactive / agent mode
 
 Every interactive flow has flag-driven equivalents so an LLM agent can drive the CLI end-to-end:
 
 - Selection: `--skill <name>` (repeatable), `--all`, or `--tag <name>`.
+- Source / target: `--from <name|url>` / `--from all` (add, list), `--to <lib>` (push promotion, detect), `--save-as <name>` (ad-hoc remote add).
 - Destination: `--dest <path>` (add), `--target <library-path>` (detect).
 - Conflict resolution: `--on-conflict overwrite|skip|abort` (add), `--on-divergence overwrite|skip|fork` (push, pull) with `--fork-suffix <s>` for non-interactive forks.
+- Audit: `--no-audit` / `--fail-on <severity>` (add, audit).
+- PR/MR: `--pr-title <title>` and `--yes` (push to a `pr` library).
 - Output: `--json` emits a structured object on stdout (cliclack output suppressed).
 - `--no-interaction` forces non-interactive mode on a TTY.
 
-Stable exit codes: `0` success (incl. nothing-to-do), `1` generic, `2` config (missing flag, no library, etc.), `3` conflict, `4` git error.
+Stable exit codes: `0` success (incl. nothing-to-do), `1` generic, `2` config (missing flag, no library, etc.), `3` conflict, `4` git error, `5` content-audit threshold exceeded.
 
 The full agent contract — flag matrix per command, JSON shapes, recipes, failure modes — lives in [`.claude/skills/skillctl-usage/SKILL.md`](.claude/skills/skillctl-usage/SKILL.md). It's installable into any project via `skillctl add` so the project's agent picks it up.
 
@@ -136,10 +168,14 @@ The full agent contract — flag matrix per command, JSON shapes, recipes, failu
 | Capability                                       | `skillctl` | `npx skills` |
 |--------------------------------------------------|:----------:|:------------:|
 | Install from a GitHub repo                       | ✓          | ✓            |
+| Install from GitLab / self-hosted git            | ✓          | ✗            |
+| Multiple libraries with read/write/pr access     | ✓          | ✗            |
 | Push local edits back to the library             | ✓          | ✗            |
+| Open a PR/MR for review (`pr` libraries)         | ✓          | ✗            |
 | Detect new local skills and contribute upstream  | ✓          | ✗            |
 | Fork-as-new on push divergence                   | ✓          | ✗            |
 | Fork-locally on pull divergence                  | ✓          | ✗            |
+| Content-audit untrusted skills before install    | ✓          | ✗            |
 | Tag-based filtering across all flows             | ✓          | ✗            |
 | Stable `--json` output + granular exit codes     | ✓          | ✗            |
 
