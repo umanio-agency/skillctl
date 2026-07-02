@@ -376,7 +376,7 @@ fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> 
             multiselect("New skills to add to the library (tag-filtered)").required(true);
         for s in &matched {
             let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
-            prompt = prompt.item(s.clone(), &s.name, hint);
+            prompt = prompt.item(s.clone(), &s.name, hint, s.tags.clone());
         }
         return prompt.interact();
     }
@@ -389,7 +389,7 @@ fn select_new_skills(args: &DetectArgs, ctx: &Context, new_skills: &[Skill]) -> 
     let mut prompt = multiselect("New skills to add to the library").required(true);
     for s in new_skills {
         let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
-        prompt = prompt.item(s.clone(), &s.name, hint);
+        prompt = prompt.item(s.clone(), &s.name, hint, s.tags.clone());
     }
     prompt.interact()
 }

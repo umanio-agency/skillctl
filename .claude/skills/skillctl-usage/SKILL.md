@@ -328,13 +328,15 @@ Errors always go to stderr regardless of mode.
 When a multi-select prompt opens (in `add`, `push`, `pull`, `detect`, `remove` without flags or `--all` and a TTY), the prompt has a live filter:
 
 - **Type any character** — appends to the filter; the list filters in real time on the skill name (substring, case-insensitive).
-- **Backspace** — edits the filter.
+- **Backspace** — edits the filter (or clears an active tag filter, see below, when the text is empty).
 - **↑ / ↓** — navigates the filtered list.
-- **Space** or **Tab** — toggles selection on the focused item.
+- **Space** or **Tab** — acts on the focused row: toggles a skill, or runs a tag meta-action (below).
 - **Enter** — confirms the prompt with all currently-selected items.
-- **Esc** or **Ctrl+C** — cancels.
+- **Esc** or **Ctrl+C** — cancels (Esc first clears an active tag filter, if any).
 
 The filter searches skill names only (so Space stays available as a toggle). The hint/description column is shown next to each row but not searched. A windowed view shows up to ~12 items at a time with `↑ N more above` / `↓ N more below` indicators when needed.
+
+**Tag meta-actions (`add`/`pull`/`detect`/`push`).** When the typed query matches a **tag** carried by the candidates, two actionable rows appear above the skill matches: `▸ tag:<name> — filter to N skill(s)` (narrows the list to that tag; Esc/Backspace exits the tag filter) and `▸ tag:<name> — select all N` (picks every skill carrying it, then shows them). Activate a meta-row with Space/Tab. This is the interactive equivalent of the `--tag`/`--all-tags` flags — same set, chosen visually. (The tabbed cross-library picker and the `push --to`/`remove` pickers don't surface tag meta-rows.)
 
 Agents driving the CLI never see this prompt — `--json` and non-TTY contexts suppress all interactive UI.
 

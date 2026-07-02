@@ -249,7 +249,7 @@ fn select_candidates(
     }
     let mut prompt = multiselect::<usize>("Skills to remove").required(true);
     for (i, c) in candidates.iter().enumerate() {
-        prompt = prompt.item(i, &c.name, c.hint());
+        prompt = prompt.item(i, &c.name, c.hint(), Vec::new());
     }
     prompt.interact()
 }

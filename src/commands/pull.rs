@@ -568,7 +568,7 @@ fn select_pullable(args: &PullArgs, ctx: &Context, pullable: &[&Candidate]) -> R
         let mut prompt = multiselect("Skills to pull (tag-filtered)").required(true);
         for c in &matched {
             let hint = describe(&c.status);
-            prompt = prompt.item(c.index, &c.name, hint);
+            prompt = prompt.item(c.index, &c.name, hint, c.tags.clone());
         }
         return prompt.interact();
     }
@@ -581,7 +581,7 @@ fn select_pullable(args: &PullArgs, ctx: &Context, pullable: &[&Candidate]) -> R
     let mut prompt = multiselect("Skills to pull").required(true);
     for c in pullable {
         let hint = describe(&c.status);
-        prompt = prompt.item(c.index, &c.name, hint);
+        prompt = prompt.item(c.index, &c.name, hint, c.tags.clone());
     }
     prompt.interact()
 }

@@ -1325,7 +1325,7 @@ fn select_for_promotion(
         }
         let mut prompt = multiselect("Skills to promote (tag-filtered)").required(true);
         for idx in &matched {
-            prompt = prompt.item(*idx, &installed[*idx].name, "");
+            prompt = prompt.item(*idx, &installed[*idx].name, "", Vec::new());
         }
         return prompt.interact();
     }
@@ -1338,7 +1338,7 @@ fn select_for_promotion(
     let mut prompt = multiselect("Skills to promote").required(true);
     for (idx, i) in installed.iter().enumerate() {
         let hint = i.library.as_deref().unwrap_or("default");
-        prompt = prompt.item(idx, &i.name, hint);
+        prompt = prompt.item(idx, &i.name, hint, Vec::new());
     }
     prompt.interact()
 }
@@ -1408,7 +1408,7 @@ fn select_pushable(args: &PushArgs, ctx: &Context, pushable: &[&Candidate]) -> R
         let mut prompt = multiselect("Skills to push (tag-filtered)").required(true);
         for c in &matched {
             let hint = describe(&c.status);
-            prompt = prompt.item(c.index, &c.name, hint);
+            prompt = prompt.item(c.index, &c.name, hint, c.tags.clone());
         }
         return prompt.interact();
     }
@@ -1421,7 +1421,7 @@ fn select_pushable(args: &PushArgs, ctx: &Context, pushable: &[&Candidate]) -> R
     let mut prompt = multiselect("Skills to push").required(true);
     for c in pushable {
         let hint = describe(&c.status);
-        prompt = prompt.item(c.index, &c.name, hint);
+        prompt = prompt.item(c.index, &c.name, hint, c.tags.clone());
     }
     prompt.interact()
 }

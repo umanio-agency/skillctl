@@ -1067,7 +1067,7 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
         let mut prompt = multiselect("Skills to install (tag-filtered)").required(true);
         for s in &matched {
             let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
-            prompt = prompt.item(s.clone(), &s.name, hint);
+            prompt = prompt.item(s.clone(), &s.name, hint, s.tags.clone());
         }
         return prompt.interact();
     }
@@ -1080,7 +1080,7 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
     let mut prompt = multiselect("Skills to install").required(true);
     for s in skills {
         let hint = s.description.as_deref().map(short_hint).unwrap_or_default();
-        prompt = prompt.item(s.clone(), &s.name, hint);
+        prompt = prompt.item(s.clone(), &s.name, hint, s.tags.clone());
     }
     prompt.interact()
 }

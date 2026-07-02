@@ -5,16 +5,20 @@
 //!
 //! Key bindings:
 //! - Type any char  — append to filter (matches label, case-insensitive substring)
-//! - Backspace      — edit filter
+//! - Backspace      — edit filter (or clear an active tag filter when empty)
 //! - ↑ / ↓          — navigate filtered list
-//! - Space / Tab    — toggle the focused item
+//! - Space / Tab    — act on the focused row: toggle a skill, or run a meta-action
 //! - Enter          — confirm
-//! - Esc / Ctrl+C   — cancel
+//! - Esc / Ctrl+C   — cancel (Esc first clears an active tag filter, if any)
 //!
 //! Filter applies to the label only (skill names) so Space stays free as a
-//! toggle. Hint text is shown but not searched.
+//! toggle. Hint text is shown but not searched. When the query matches a
+//! **tag** carried by the items, actionable meta-rows appear above the skill
+//! matches (`tag:<name> — filter` narrows to that tag; `tag:<name> — select
+//! all` picks every skill carrying it), turning tags into first-class
+//! navigation instead of a name-only substring match.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Stdout, Write, stdout};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -37,6 +41,11 @@ const MARK_FOCUS: &str = "❯";
 const COLOR_DIM: Color = Color::Grey;
 const COLOR_ACCENT: Color = Color::Cyan;
 const COLOR_SELECTED: Color = Color::Green;
+const COLOR_META: Color = Color::Magenta;
+const MARK_META: &str = "▸";
+/// Cap on how many distinct matching tags get meta-rows, so a broad query
+/// can't bury the skill matches under a wall of tag actions.
+const MAX_META_TAGS: usize = 3;
 
 pub struct FilterMultiSelect<T: Clone> {
     title: String,
@@ -48,6 +57,7 @@ struct PromptItem<T> {
     value: T,
     label: String,
     hint: String,
+    tags: Vec<String>,
 }
 
 pub fn multiselect<T: Clone>(title: impl Into<String>) -> FilterMultiSelect<T> {
@@ -64,11 +74,20 @@ impl<T: Clone> FilterMultiSelect<T> {
         self
     }
 
-    pub fn item(mut self, value: T, label: impl Into<String>, hint: impl Into<String>) -> Self {
+    /// Append a candidate. `tags` powers the tag meta-rows; pass an empty vec
+    /// for a plain, tag-less picker.
+    pub fn item(
+        mut self,
+        value: T,
+        label: impl Into<String>,
+        hint: impl Into<String>,
+        tags: Vec<String>,
+    ) -> Self {
         self.items.push(PromptItem {
             value,
             label: label.into(),
             hint: hint.into(),
+            tags,
         });
         self
     }
@@ -83,6 +102,7 @@ impl<T: Clone> FilterMultiSelect<T> {
             items: self.items,
             required: self.required,
             query: String::new(),
+            active_tag: None,
             focus: 0,
             selected: HashSet::new(),
             visible: Vec::new(),
@@ -158,7 +178,12 @@ impl<T: Clone> TabbedMultiSelect<T> {
             label: label.into(),
             items: items
                 .into_iter()
-                .map(|(value, label, hint)| PromptItem { value, label, hint })
+                .map(|(value, label, hint)| PromptItem {
+                    value,
+                    label,
+                    hint,
+                    tags: Vec::new(),
+                })
                 .collect(),
         });
         self
@@ -248,22 +273,101 @@ impl<T> TabState<T> {
     }
 }
 
+/// A rendered/navigable line in the single-list picker: either a real skill or
+/// one of the tag meta-actions surfaced above the matches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Row {
+    /// Narrow the list to skills carrying `tag`.
+    MetaFilter { tag: String, count: usize },
+    /// Select every skill carrying `tag` (and narrow to show them).
+    MetaSelectAll { tag: String, count: usize },
+    /// A real candidate at `items[item_idx]`.
+    Skill { item_idx: usize },
+}
+
 struct State<T> {
     title: String,
     items: Vec<PromptItem<T>>,
     required: bool,
     query: String,
+    /// When set, the list is narrowed to skills carrying this tag (entered from
+    /// a meta-row); the text `query` still refines by label on top of it.
+    active_tag: Option<String>,
     focus: usize,
     selected: HashSet<usize>,
-    visible: Vec<usize>,
+    visible: Vec<Row>,
     last_lines: u16,
 }
 
 impl<T> State<T> {
     fn refilter(&mut self) {
-        self.visible = filter_indices(&self.query, &self.items);
+        let mut rows: Vec<Row> = Vec::new();
+        // Meta-rows only in plain mode (no active tag) with a non-empty query.
+        if self.active_tag.is_none() && !self.query.is_empty() {
+            for (tag, count) in matching_tags(&self.query, &self.items) {
+                rows.push(Row::MetaFilter {
+                    tag: tag.clone(),
+                    count,
+                });
+                rows.push(Row::MetaSelectAll { tag, count });
+            }
+        }
+        // Skill rows: label substring, intersected with the active tag (if any).
+        for idx in filter_indices(&self.query, &self.items) {
+            if let Some(tag) = &self.active_tag {
+                if !self.items[idx]
+                    .tags
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(tag))
+                {
+                    continue;
+                }
+            }
+            rows.push(Row::Skill { item_idx: idx });
+        }
+        self.visible = rows;
         if self.focus >= self.visible.len() {
             self.focus = self.visible.len().saturating_sub(1);
+        }
+    }
+
+    /// Enter tag-filter mode: narrow to `tag`, clear the text query, reset focus.
+    fn enter_tag_filter(&mut self, tag: String) {
+        self.active_tag = Some(tag);
+        self.query.clear();
+        self.focus = 0;
+        self.refilter();
+    }
+
+    /// Leave tag-filter mode (Esc / Backspace-on-empty).
+    fn clear_tag_filter(&mut self) {
+        self.active_tag = None;
+        self.query.clear();
+        self.focus = 0;
+        self.refilter();
+    }
+
+    /// Select every skill carrying `tag`, then narrow the view to show them.
+    fn select_all_tagged(&mut self, tag: &str) {
+        for (i, it) in self.items.iter().enumerate() {
+            if it.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                self.selected.insert(i);
+            }
+        }
+        self.enter_tag_filter(tag.to_string());
+    }
+
+    /// Space/Tab on the focused row: toggle a skill, or run its meta-action.
+    fn activate_focused(&mut self) {
+        match self.visible.get(self.focus).cloned() {
+            Some(Row::Skill { item_idx }) => {
+                if !self.selected.remove(&item_idx) {
+                    self.selected.insert(item_idx);
+                }
+            }
+            Some(Row::MetaFilter { tag, .. }) => self.enter_tag_filter(tag),
+            Some(Row::MetaSelectAll { tag, .. }) => self.select_all_tagged(&tag),
+            None => {}
         }
     }
 }
@@ -275,11 +379,54 @@ impl<T> Default for State<T> {
             items: Vec::new(),
             required: false,
             query: String::new(),
+            active_tag: None,
             focus: 0,
             selected: HashSet::new(),
             visible: Vec::new(),
             last_lines: 0,
         }
+    }
+}
+
+/// Distinct tags across `items` whose name matches `query` (case-insensitive
+/// substring), with the count of items carrying each, ranked exact → prefix →
+/// substring, then by descending count, then alphabetically. Capped at
+/// [`MAX_META_TAGS`].
+fn matching_tags<T>(query: &str, items: &[PromptItem<T>]) -> Vec<(String, usize)> {
+    let q = query.to_lowercase();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for it in items {
+        let mut seen: HashSet<String> = HashSet::new();
+        for t in &it.tags {
+            let key = t.to_lowercase();
+            if seen.insert(key) {
+                *counts.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut matched: Vec<(String, usize)> = counts
+        .into_iter()
+        .filter(|(t, _)| t.to_lowercase().contains(&q))
+        .collect();
+    matched.sort_by(|a, b| {
+        tag_rank(&a.0, &q)
+            .cmp(&tag_rank(&b.0, &q))
+            .then(b.1.cmp(&a.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    matched.truncate(MAX_META_TAGS);
+    matched
+}
+
+/// 0 = exact match, 1 = prefix, 2 = other substring. `q` is already lowercase.
+fn tag_rank(tag: &str, q: &str) -> u8 {
+    let t = tag.to_lowercase();
+    if t == q {
+        0
+    } else if t.starts_with(q) {
+        1
+    } else {
+        2
     }
 }
 
@@ -320,7 +467,13 @@ fn run_event_loop<T: Clone>(
                     return Err(LoopError::Cancelled);
                 }
                 match code {
-                    KeyCode::Esc => return Err(LoopError::Cancelled),
+                    KeyCode::Esc => {
+                        if state.active_tag.is_some() {
+                            state.clear_tag_filter();
+                        } else {
+                            return Err(LoopError::Cancelled);
+                        }
+                    }
                     KeyCode::Enter => {
                         if state.required && state.selected.is_empty() {
                             // Don't confirm with empty selection in required mode; ignore.
@@ -334,18 +487,14 @@ fn run_event_loop<T: Clone>(
                     KeyCode::Down if state.focus + 1 < state.visible.len() => {
                         state.focus += 1;
                     }
-                    KeyCode::Tab | KeyCode::Char(' ') => {
-                        if let Some(&idx) = state.visible.get(state.focus) {
-                            if state.selected.contains(&idx) {
-                                state.selected.remove(&idx);
-                            } else {
-                                state.selected.insert(idx);
-                            }
+                    KeyCode::Tab | KeyCode::Char(' ') => state.activate_focused(),
+                    KeyCode::Backspace => {
+                        if !state.query.is_empty() {
+                            state.query.pop();
+                            state.refilter();
+                        } else if state.active_tag.is_some() {
+                            state.clear_tag_filter();
                         }
-                    }
-                    KeyCode::Backspace if !state.query.is_empty() => {
-                        state.query.pop();
-                        state.refilter();
                     }
                     KeyCode::Char(c) if !c.is_control() => {
                         state.query.push(c);
@@ -695,7 +844,7 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
     )?;
     lines += 1;
 
-    // Search bar
+    // Search bar (shows the active tag filter, if any)
     queue!(
         out,
         SetForegroundColor(COLOR_DIM),
@@ -703,7 +852,24 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
         ResetColor,
         Print("  "),
     )?;
-    if state.query.is_empty() {
+    if let Some(tag) = &state.active_tag {
+        queue!(
+            out,
+            SetForegroundColor(COLOR_META),
+            Print(format!("{MARK_META} tag:{tag}")),
+            ResetColor
+        )?;
+        if state.query.is_empty() {
+            queue!(
+                out,
+                SetForegroundColor(COLOR_DIM),
+                Print("  (esc clears)"),
+                ResetColor
+            )?;
+        } else {
+            queue!(out, Print(format!("  {}", state.query)))?;
+        }
+    } else if state.query.is_empty() {
         queue!(
             out,
             SetForegroundColor(COLOR_DIM),
@@ -740,11 +906,10 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
             )?;
             lines += 1;
         }
-        for (offset, idx_in_visible) in (start..end).enumerate() {
-            let item_idx = state.visible[idx_in_visible];
+        let prefix_width = 6; // bar + spaces + focus + marker
+        let max_body = cols.saturating_sub(prefix_width).max(20);
+        for idx_in_visible in start..end {
             let is_focused = idx_in_visible == state.focus;
-            let is_selected = state.selected.contains(&item_idx);
-            let item = &state.items[item_idx];
 
             queue!(
                 out,
@@ -753,7 +918,6 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
                 ResetColor,
                 Print("  ")
             )?;
-
             if is_focused {
                 queue!(
                     out,
@@ -766,58 +930,67 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
                 queue!(out, Print("  "))?;
             }
 
-            if is_selected {
-                queue!(
-                    out,
-                    SetForegroundColor(COLOR_SELECTED),
-                    Print(MARK_SELECTED),
-                    ResetColor
-                )?;
-            } else {
-                queue!(
-                    out,
-                    SetForegroundColor(COLOR_DIM),
-                    Print(MARK_UNSELECTED),
-                    ResetColor
-                )?;
+            match &state.visible[idx_in_visible] {
+                Row::Skill { item_idx } => {
+                    let is_selected = state.selected.contains(item_idx);
+                    let item = &state.items[*item_idx];
+                    if is_selected {
+                        queue!(
+                            out,
+                            SetForegroundColor(COLOR_SELECTED),
+                            Print(MARK_SELECTED),
+                            ResetColor
+                        )?;
+                    } else {
+                        queue!(
+                            out,
+                            SetForegroundColor(COLOR_DIM),
+                            Print(MARK_UNSELECTED),
+                            ResetColor
+                        )?;
+                    }
+                    queue!(out, Print(" "))?;
+
+                    let hint_part = if !item.hint.is_empty() {
+                        format!("  {}", item.hint)
+                    } else {
+                        String::new()
+                    };
+                    let combined = format!("{}{}", item.label, hint_part);
+                    let truncated = truncate_to(&combined, max_body);
+                    if !item.hint.is_empty() && truncated.len() == combined.len() {
+                        queue!(out, Print(&item.label))?;
+                        queue!(
+                            out,
+                            SetForegroundColor(COLOR_DIM),
+                            Print("  "),
+                            Print(&item.hint),
+                            ResetColor
+                        )?;
+                    } else {
+                        queue!(out, Print(truncated))?;
+                    }
+                }
+                Row::MetaFilter { tag, count } => {
+                    let text = format!("{MARK_META} tag:{tag} — filter to {count} skill(s)");
+                    queue!(
+                        out,
+                        SetForegroundColor(COLOR_META),
+                        Print(truncate_to(&text, max_body)),
+                        ResetColor
+                    )?;
+                }
+                Row::MetaSelectAll { tag, count } => {
+                    let text = format!("{MARK_META} tag:{tag} — select all {count}");
+                    queue!(
+                        out,
+                        SetForegroundColor(COLOR_META),
+                        Print(truncate_to(&text, max_body)),
+                        ResetColor
+                    )?;
+                }
             }
-            queue!(out, Print(" "))?;
-
-            // Label (truncated to fit)
-            let prefix_width = 6; // bar + spaces + focus + select markers
-            let max_label_and_hint = cols.saturating_sub(prefix_width).max(20);
-            let label_text = if is_focused {
-                format!("\x1b[1m{}\x1b[0m", item.label)
-            } else {
-                item.label.clone()
-            };
-
-            let hint_part = if !item.hint.is_empty() {
-                format!("  {}", item.hint)
-            } else {
-                String::new()
-            };
-
-            let combined = format!("{}{}", item.label, hint_part);
-            let truncated = truncate_to(&combined, max_label_and_hint);
-
-            // Re-print with hint dimmed if present and not truncated past it
-            if !item.hint.is_empty() && truncated.len() == combined.len() {
-                queue!(out, Print(&item.label))?;
-                queue!(
-                    out,
-                    SetForegroundColor(COLOR_DIM),
-                    Print("  "),
-                    Print(&item.hint),
-                    ResetColor
-                )?;
-            } else {
-                queue!(out, Print(truncated))?;
-            }
-
             queue!(out, Print("\r\n"))?;
-            let _ = label_text; // keep unused-warning quiet for now
-            let _ = offset;
             lines += 1;
         }
         if end < state.visible.len() {
@@ -854,7 +1027,12 @@ fn render<T>(out: &mut Stdout, state: &State<T>) -> Result<u16> {
 
 fn footer_text<T>(state: &State<T>) -> String {
     let count = state.selected.len();
-    format!("{count} selected • space toggle • enter confirm • esc cancel")
+    let esc = if state.active_tag.is_some() {
+        "esc clears filter"
+    } else {
+        "esc cancel"
+    };
+    format!("{count} selected • space toggle/act • enter confirm • {esc}")
 }
 
 fn render_final<T>(out: &mut Stdout, state: &State<T>) -> Result<()> {
@@ -958,7 +1136,159 @@ mod tests {
             value: (),
             label: label.to_string(),
             hint: String::new(),
+            tags: Vec::new(),
         }
+    }
+
+    fn tagged(label: &str, tags: &[&str]) -> PromptItem<()> {
+        PromptItem {
+            value: (),
+            label: label.to_string(),
+            hint: String::new(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn state_with(items: Vec<PromptItem<()>>) -> State<()> {
+        let mut s = State {
+            items,
+            ..State::default()
+        };
+        s.refilter();
+        s
+    }
+
+    fn skill_indices(s: &State<()>) -> Vec<usize> {
+        s.visible
+            .iter()
+            .filter_map(|r| match r {
+                Row::Skill { item_idx } => Some(*item_idx),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn matching_tags_ranks_exact_then_prefix_then_substring() {
+        let items = vec![
+            tagged("a", &["advideo"]),
+            tagged("b", &["video-editing"]),
+            tagged("c", &["video"]),
+        ];
+        let names: Vec<String> = matching_tags("video", &items)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(names, vec!["video", "video-editing", "advideo"]);
+    }
+
+    #[test]
+    fn matching_tags_counts_distinct_carriers() {
+        let items = vec![
+            tagged("a", &["video"]),
+            tagged("b", &["video"]),
+            tagged("c", &["audio"]),
+        ];
+        assert_eq!(matching_tags("vid", &items), vec![("video".to_string(), 2)]);
+    }
+
+    #[test]
+    fn refilter_surfaces_meta_rows_above_skill_matches() {
+        let items = vec![
+            tagged("alpha", &["video"]),
+            tagged("beta", &["audio"]),
+            tagged("vidtool", &[]),
+        ];
+        let mut s = state_with(items);
+        s.query = "vid".to_string();
+        s.refilter();
+        assert_eq!(
+            s.visible[0],
+            Row::MetaFilter {
+                tag: "video".to_string(),
+                count: 1
+            }
+        );
+        assert_eq!(
+            s.visible[1],
+            Row::MetaSelectAll {
+                tag: "video".to_string(),
+                count: 1
+            }
+        );
+        // Only labels containing "vid" become skill rows.
+        assert_eq!(skill_indices(&s), vec![2]);
+    }
+
+    #[test]
+    fn tag_mode_hides_meta_rows_and_filters_by_tag() {
+        let items = vec![
+            tagged("alpha", &["video"]),
+            tagged("beta", &["video"]),
+            tagged("gamma", &["audio"]),
+        ];
+        let mut s = state_with(items);
+        s.enter_tag_filter("video".to_string());
+        assert_eq!(s.active_tag.as_deref(), Some("video"));
+        assert!(s.visible.iter().all(|r| matches!(r, Row::Skill { .. })));
+        assert_eq!(skill_indices(&s), vec![0, 1]);
+    }
+
+    #[test]
+    fn select_all_tagged_selects_carriers_and_narrows() {
+        let items = vec![
+            tagged("alpha", &["video"]),
+            tagged("beta", &["video"]),
+            tagged("gamma", &["audio"]),
+        ];
+        let mut s = state_with(items);
+        s.select_all_tagged("video");
+        assert!(s.selected.contains(&0) && s.selected.contains(&1));
+        assert!(!s.selected.contains(&2));
+        assert_eq!(s.active_tag.as_deref(), Some("video"));
+    }
+
+    #[test]
+    fn clear_tag_filter_restores_full_list() {
+        let items = vec![tagged("alpha", &["video"]), tagged("gamma", &["audio"])];
+        let mut s = state_with(items);
+        s.enter_tag_filter("video".to_string());
+        assert_eq!(skill_indices(&s), vec![0]);
+        s.clear_tag_filter();
+        assert!(s.active_tag.is_none());
+        assert_eq!(skill_indices(&s), vec![0, 1]);
+    }
+
+    #[test]
+    fn tag_matching_is_case_insensitive() {
+        let items = vec![tagged("alpha", &["Video"])];
+        let mut s = state_with(items);
+        s.query = "vid".to_string();
+        s.refilter();
+        assert!(matches!(s.visible.first(), Some(Row::MetaFilter { .. })));
+        s.select_all_tagged("VIDEO");
+        assert!(s.selected.contains(&0));
+    }
+
+    #[test]
+    fn activate_focused_meta_filter_enters_tag_mode() {
+        let items = vec![tagged("alpha", &["video"]), tagged("vidx", &[])];
+        let mut s = state_with(items);
+        s.query = "vid".to_string();
+        s.refilter();
+        s.focus = 0; // the MetaFilter row
+        s.activate_focused();
+        assert_eq!(s.active_tag.as_deref(), Some("video"));
+    }
+
+    #[test]
+    fn activate_focused_skill_toggles_selection() {
+        let items = vec![tagged("alpha", &["video"])];
+        let mut s = state_with(items); // no query → single skill row at focus 0
+        s.activate_focused();
+        assert!(s.selected.contains(&0));
+        s.activate_focused();
+        assert!(!s.selected.contains(&0));
     }
 
     #[test]
