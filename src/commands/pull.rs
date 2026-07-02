@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::cli::{OnDivergence, PullArgs};
 use crate::commands::diff::{SkillStatus, classify};
-use crate::commands::shared::{audit_gate, matches_tags};
+use crate::commands::shared::{AuditGate, audit_gate, matches_tags};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -356,24 +356,35 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
     // (both a straight pull and a fork-local write the library content into the
     // destination). Warn-only by default; `--fail-on` refuses the whole batch
     // before anything is written; `--no-audit` skips (refused above for
-    // third-party provenance). A path that fails `safe_join` is left for the
-    // write loop to surface per-skill rather than aborting the batch here.
-    let audit_verdicts: HashMap<String, &'static str> = if args.no_audit {
-        HashMap::new()
-    } else {
-        let mut targets: Vec<(String, PathBuf)> = Vec::with_capacity(applies.len());
-        for apply in &applies {
-            let installed = &project_cfg.installed[apply.candidate_index];
-            if let Ok(dir) = safe_join(&apply.library_root, &installed.source_path) {
-                targets.push((installed.name.clone(), dir));
-            }
+    // third-party provenance); in an interactive TTY, flagged skills trigger the
+    // batch-triage menu. A path that fails `safe_join` is not scanned and is
+    // left for the write loop to surface per-skill — so it must be kept below
+    // (only user-skipped flagged skills are dropped from `applies`).
+    let mut targets: Vec<(String, PathBuf)> = Vec::with_capacity(applies.len());
+    for apply in &applies {
+        let installed = &project_cfg.installed[apply.candidate_index];
+        if let Ok(dir) = safe_join(&apply.library_root, &installed.source_path) {
+            targets.push((installed.name.clone(), dir));
         }
-        audit_gate(
-            ctx,
-            targets.iter().map(|(n, p)| (n.as_str(), p.as_path())),
-            args.fail_on.map(Into::into),
-        )?
+    }
+    let audited: HashSet<String> = targets.iter().map(|(n, _)| n.clone()).collect();
+    let (approved, audit_verdicts) = match audit_gate(
+        ctx,
+        targets.iter().map(|(n, p)| (n.as_str(), p.as_path())),
+        args.no_audit,
+        args.fail_on.map(Into::into),
+    )? {
+        AuditGate::Proceed { approved, verdicts } => (approved, verdicts),
+        AuditGate::Cancelled => {
+            ui::outro_cancel(ctx, "cancelled — potentially dangerous content")?;
+            emit_json(ctx, &results);
+            return Ok(());
+        }
     };
+    applies.retain(|a| {
+        let name = &project_cfg.installed[a.candidate_index].name;
+        !audited.contains(name) || approved.contains(name)
+    });
 
     // Continue-on-error per apply: a single skill failing should not abort
     // the others or lose the saved state of earlier successes. The save at

@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::{AddArgs, OnConflict};
-use crate::commands::shared::{audit_gate, matches_tags, short_hint};
+use crate::commands::shared::{AuditGate, audit_gate, matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -122,7 +122,7 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
-    let selected = select_skills(&args, ctx, &skills)?;
+    let mut selected = select_skills(&args, ctx, &skills)?;
     if selected.is_empty() {
         ui::outro(ctx, "no skills selected")?;
         emit_json(ctx, None, &[]);
@@ -132,18 +132,29 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     // Content audit of the (untrusted) skill content before anything lands in
     // the project. Warn-only by default; `--fail-on <severity>` refuses the
     // whole batch (nothing is installed) if any selected skill reaches the
-    // threshold; `--no-audit` skips entirely. The returned map (skill name →
-    // verdict) is surfaced per-skill in the JSON output so non-interactive
-    // consumers get the audit signal even in warn-only mode.
-    let audit_verdicts = if args.no_audit {
-        HashMap::new()
-    } else {
-        audit_gate(
-            ctx,
-            selected.iter().map(|s| (s.name.as_str(), s.path.as_path())),
-            args.fail_on.map(Into::into),
-        )?
+    // threshold; `--no-audit` skips entirely. In an interactive TTY, flagged
+    // skills trigger the batch-triage menu (see `audit_gate`); the approved
+    // subset is what we install. The verdict map is surfaced per-skill in the
+    // JSON output so non-interactive consumers get the signal in warn-only mode.
+    let (approved, audit_verdicts) = match audit_gate(
+        ctx,
+        selected.iter().map(|s| (s.name.as_str(), s.path.as_path())),
+        args.no_audit,
+        args.fail_on.map(Into::into),
+    )? {
+        AuditGate::Proceed { approved, verdicts } => (approved, verdicts),
+        AuditGate::Cancelled => {
+            ui::outro_cancel(ctx, "cancelled — potentially dangerous content")?;
+            emit_json(ctx, None, &[]);
+            return Ok(());
+        }
     };
+    selected.retain(|s| approved.contains(&s.name));
+    if selected.is_empty() {
+        ui::outro(ctx, "nothing to install after triage")?;
+        emit_json(ctx, None, &[]);
+        return Ok(());
+    }
 
     let cwd = std::env::current_dir().context("reading current directory")?;
     // Serialise concurrent skillctl runs on this project's .skills.toml.
@@ -814,16 +825,26 @@ fn install_multi_source(
         });
     }
 
-    // Audit the whole span. Warn-only unless `--fail-on`; a breach refuses the
-    // entire batch atomically (nothing is copied below). Keyed by the planned
+    // Audit the whole span. Warn-only unless `--fail-on` (a breach refuses the
+    // entire batch atomically — nothing is copied below); in an interactive TTY,
+    // flagged skills trigger the batch-triage menu. Keyed by the planned
     // (collision-suffixed) name so the per-skill JSON verdict lines up.
-    let verdicts = audit_gate(
+    let (approved, verdicts) = match audit_gate(
         ctx,
         plans
             .iter()
             .map(|p| (p.name.as_str(), p.skill.path.as_path())),
+        args.no_audit,
         args.fail_on.map(Into::into),
-    )?;
+    )? {
+        AuditGate::Proceed { approved, verdicts } => (approved, verdicts),
+        AuditGate::Cancelled => {
+            ui::outro_cancel(ctx, "cancelled — potentially dangerous content")?;
+            emit_json(ctx, Some(&dest_root), &results);
+            return Ok(());
+        }
+    };
+    plans.retain(|p| approved.contains(&p.name));
 
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::DetectArgs;
-use crate::commands::shared::{audit_gate, matches_tags, short_hint};
+use crate::commands::shared::{AuditGate, audit_gate, matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -156,18 +156,29 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
     // Audit the local skills before they are published to the library — a
     // pre-publish safety net that catches secrets or dangerous content headed
     // for a shared source. Warn-only by default; `--fail-on` refuses the whole
-    // batch (nothing is copied or committed); `--no-audit` skips.
-    let audit_verdicts: HashMap<String, &'static str> = if args.no_audit {
-        HashMap::new()
-    } else {
-        audit_gate(
-            ctx,
-            applies
-                .iter()
-                .map(|(s, _, _)| (s.name.as_str(), s.path.as_path())),
-            args.fail_on.map(Into::into),
-        )?
+    // batch (nothing is copied or committed); `--no-audit` skips; in an
+    // interactive TTY, flagged skills trigger the batch-triage menu.
+    let (approved, audit_verdicts) = match audit_gate(
+        ctx,
+        applies
+            .iter()
+            .map(|(s, _, _)| (s.name.as_str(), s.path.as_path())),
+        args.no_audit,
+        args.fail_on.map(Into::into),
+    )? {
+        AuditGate::Proceed { approved, verdicts } => (approved, verdicts),
+        AuditGate::Cancelled => {
+            ui::outro_cancel(ctx, "cancelled — potentially dangerous content")?;
+            emit_json(ctx, Some(&lib_dest_relative), &results, None);
+            return Ok(());
+        }
     };
+    applies.retain(|(s, _, _)| approved.contains(&s.name));
+    if applies.is_empty() {
+        ui::outro(ctx, "nothing to add after triage")?;
+        emit_json(ctx, Some(&lib_dest_relative), &results, None);
+        return Ok(());
+    }
 
     for (skill, _lib_relative, lib_absolute) in &applies {
         fs_util::copy_dir_all(&skill.path, lib_absolute)?;
