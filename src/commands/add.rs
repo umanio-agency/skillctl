@@ -11,9 +11,8 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::audit::{self, Severity};
 use crate::cli::{AddArgs, OnConflict};
-use crate::commands::shared::{matches_tags, short_hint};
+use crate::commands::shared::{audit_gate, matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -139,7 +138,11 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     let audit_verdicts = if args.no_audit {
         HashMap::new()
     } else {
-        audit_gate(ctx, &selected, args.fail_on.map(Into::into))?
+        audit_gate(
+            ctx,
+            selected.iter().map(|s| (s.name.as_str(), s.path.as_path())),
+            args.fail_on.map(Into::into),
+        )?
     };
 
     let cwd = std::env::current_dir().context("reading current directory")?;
@@ -812,38 +815,15 @@ fn install_multi_source(
     }
 
     // Audit the whole span. Warn-only unless `--fail-on`; a breach refuses the
-    // entire batch atomically (nothing is copied below).
-    let fail_on: Option<Severity> = args.fail_on.map(Into::into);
-    let mut verdicts: HashMap<String, &'static str> = HashMap::new();
-    let mut blocked: Vec<String> = Vec::new();
-    for plan in &plans {
-        let report = audit::scan_skill(&plan.skill.path);
-        verdicts.insert(plan.name.clone(), report.verdict().as_str());
-        for f in &report.findings {
-            ui::log_warning(
-                ctx,
-                format!(
-                    "audit[{}] {}: {} ({}:{})",
-                    plan.name,
-                    f.severity.as_str(),
-                    f.label,
-                    f.file,
-                    f.line
-                ),
-            )?;
-        }
-        if fail_on.is_some_and(|t| report.max_severity().is_some_and(|m| m >= t)) {
-            blocked.push(format!("{} ({})", plan.name, report.verdict().as_str()));
-        }
-    }
-    if !blocked.is_empty() {
-        let threshold = fail_on.map(|t| t.as_str()).unwrap_or("warning");
-        return Err(AppError::Audit(format!(
-            "refusing to install (content audit ≥ `{threshold}`): {}",
-            blocked.join(", ")
-        ))
-        .into());
-    }
+    // entire batch atomically (nothing is copied below). Keyed by the planned
+    // (collision-suffixed) name so the per-skill JSON verdict lines up.
+    let verdicts = audit_gate(
+        ctx,
+        plans
+            .iter()
+            .map(|p| (p.name.as_str(), p.skill.path.as_path())),
+        args.fail_on.map(Into::into),
+    )?;
 
     let installed_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -992,52 +972,6 @@ fn name_or_dest_taken(
     folder: &OsStr,
 ) -> bool {
     taken_names.contains(name) || taken_dests.contains(&dest_key(cwd, dest_root, folder))
-}
-
-/// Scan each selected skill's content. Findings are logged as warnings
-/// (no-op under `--json`); when `fail_on` is set, any skill reaching that
-/// severity blocks the entire batch (nothing is installed) so untrusted
-/// content never lands in the project on a failed bar. Returns a map of skill
-/// name → verdict so the caller can surface it in the JSON output (the signal
-/// non-interactive consumers would otherwise miss in warn-only mode).
-fn audit_gate(
-    ctx: &Context,
-    selected: &[Skill],
-    fail_on: Option<Severity>,
-) -> Result<HashMap<String, &'static str>> {
-    let mut blocked: Vec<String> = Vec::new();
-    let mut verdicts: HashMap<String, &'static str> = HashMap::new();
-    for s in selected {
-        let report = audit::scan_skill(&s.path);
-        verdicts.insert(s.name.clone(), report.verdict().as_str());
-        for f in &report.findings {
-            ui::log_warning(
-                ctx,
-                format!(
-                    "audit[{}] {}: {} ({}:{})",
-                    s.name,
-                    f.severity.as_str(),
-                    f.label,
-                    f.file,
-                    f.line
-                ),
-            )?;
-        }
-        let over_threshold = fail_on.is_some_and(|t| report.max_severity().is_some_and(|m| m >= t));
-        if over_threshold {
-            blocked.push(format!("{} ({})", s.name, report.verdict().as_str()));
-        }
-    }
-    if !blocked.is_empty() {
-        // `blocked` is only populated when `fail_on` is `Some`.
-        let threshold = fail_on.map(|t| t.as_str()).unwrap_or("warning");
-        return Err(AppError::Audit(format!(
-            "refusing to install (content audit ≥ `{threshold}`): {}. Re-run with --no-audit to override.",
-            blocked.join(", ")
-        ))
-        .into());
-    }
-    Ok(verdicts)
 }
 
 fn emit_json(ctx: &Context, destination: Option<&PathBuf>, results: &[Value]) {

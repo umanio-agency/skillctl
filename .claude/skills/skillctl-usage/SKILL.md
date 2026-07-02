@@ -216,10 +216,14 @@ skillctl pull --tag <tag> [--tag <tag> …] [--all-tags]
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. |
 | `--on-divergence <overwrite\|skip\|fork>` | Strategy for divergent skills. `fork` here means **fork-locally** (rename the local copy under a new name, then pull the library version into the original destination). Default when omitted: skip. |
 | `--fork-suffix <suffix>` | Required when `--on-divergence fork` is used non-interactively. New local name = `<original>-<suffix>`. |
+| `--no-audit` | Skip the content security audit of the incoming library content. **Refused** (exit 2) for skills whose provenance is a non-default (third-party) library. |
+| `--fail-on <info\|warning\|critical>` | Refuse the **whole batch** (pull nothing, exit 5) if any incoming skill's content audit reaches this severity. Without it the audit is warn-only. |
 
 For each pullable skill, `skillctl pull` runs the same blob-SHA classification as `push` (in reverse direction): pullable = `LibraryAhead` (library moved, local hasn't) or `BothDiverged`. Library content overwrites local; the project's `.skills.toml` `source_sha` is rewritten to the current library HEAD. **No git operations on the project side** — the project repo is untouched, and the user can review/commit the resulting file changes via their own workflow. `pull` **follows provenance**: each skill refreshes from the library it was installed from (a run may touch several library caches), and its `source_sha` is rewritten to *that* library's HEAD. A skill whose recorded provenance is no longer a configured library is listed and skipped.
 
 **Fork-locally** (preserving your local edits under a new name while pulling the library version into the original location) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: each divergent skill's local folder is renamed to `<original>-<suffix>`, then the library version drops into the original destination.
+
+**Content audit on pull.** Before applying, `pull` audits the *incoming* library version of each skill about to land (the same scan as `skillctl audit`). It is **warn-only** by default; under `--json` each pulled result carries an `"audit_verdict"` field (`safe`/`caution`/`warning`/`dangerous`). `--fail-on <severity>` refuses the whole batch (nothing is written, exit 5); `--no-audit` skips the scan, but is **refused** (exit 2) for any skill whose provenance is a non-default (third-party) library — third-party updates can never be silenced.
 
 ### `skillctl detect` — find new local skills and add them to the library
 
@@ -237,8 +241,12 @@ skillctl detect --tag <tag> [--tag <tag> …] [--all-tags] --target <library-pat
 | `--all-tags` | Switch tag matching to intersection. Requires `--tag`. | No |
 | `--to <name>` | Writable library to add the skills to. Defaults to the sole `write`-access library; **required when several are configured**. Refused for `read`/`pr` libraries. | Yes, when more than one writable library is configured |
 | `--target <path>` | Library-relative folder where the new skills should land. Use `.` for the library root (flat-layout libraries), or e.g. `skills` / `.claude/skills` for a subfolder. | **Yes** |
+| `--no-audit` | Skip the content security audit of the local skills before adding them to the library. | No |
+| `--fail-on <info\|warning\|critical>` | Refuse the **whole batch** (add nothing, exit 5) if any skill's content audit reaches this severity. Without it the audit is warn-only. | No |
 
 `skillctl detect` walks the current directory for `SKILL.md` files, drops anything already declared in `.skills.toml`, copies the leftovers into the chosen library's cache under `<target>/<skill-folder-name>`, single-commits with a `add skill(s): …` message, pushes, and appends the new entries to `.skills.toml` with that library's provenance. The target library is the sole writable library by default; with several, pass `--to <name>` (non-interactive) or pick from the Select (interactive). `read`/`pr` libraries cannot be detect targets (the latter pending the PR/MR flow).
+
+**Content audit on detect.** Before publishing, `detect` audits the local content of each new skill — a pre-publish check for secrets or dangerous patterns headed for a (possibly shared) library. It is **warn-only** by default; under `--json` each added result carries an `"audit_verdict"` field. `--fail-on <severity>` refuses the whole batch (nothing is copied, committed, or pushed; exit 5); `--no-audit` skips the scan.
 
 ### `skillctl remove` — remove skills from the current project
 
@@ -303,7 +311,7 @@ A "skill" is any folder containing a file literally named `SKILL.md`. The skill'
 - `2` — **configuration error**: no library configured, library cache missing, malformed URL, missing required flag in non-interactive mode (e.g. `--dest`, `--skill`, `--target`), invalid skill name, malformed `.skills.toml`.
 - `3` — **conflict**: a destination already exists with no `--on-conflict` policy in non-interactive mode, a fork target collides in the library, or a local fork target collides.
 - `4` — **git error**: `git clone`/`fetch`/`commit`/`push`/`hash-object`/`ls-tree` failed (auth, network, missing user identity, etc.).
-- `5` — **content-audit threshold exceeded**: `add --fail-on <severity>` refused to install (nothing was installed), or `audit --fail-on <severity>` found a finding at or above the threshold.
+- `5` — **content-audit threshold exceeded**: a `--fail-on <severity>` bar was hit and nothing was written — `add` refused to install, `pull` refused to apply, `detect` refused to add, or `audit` found a finding at or above the threshold.
 
 Agents should branch on exit code first, then optionally inspect stderr for context. Stdout in `--json` mode is always either a single JSON object (success or partial success) or empty (early failure before output is built).
 

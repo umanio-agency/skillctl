@@ -284,6 +284,17 @@ pub struct PullArgs {
     /// Required when `--on-divergence fork` is used without a TTY.
     #[arg(long, value_name = "SUFFIX")]
     pub fork_suffix: Option<String>,
+
+    /// Skip the content security audit of the incoming library content. Refused
+    /// for skills whose provenance is a non-default (third-party) library.
+    #[arg(long)]
+    pub no_audit: bool,
+
+    /// Refuse the whole batch (nothing is pulled) if any incoming skill's
+    /// content audit reaches this severity (`info` | `warning` | `critical`).
+    /// Without it, the audit is warn-only.
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    pub fail_on: Option<SeverityArg>,
 }
 
 #[derive(Args, Debug)]
@@ -324,6 +335,17 @@ pub struct DetectArgs {
     /// third-party dependency cannot be silently shipped to the library.
     #[arg(long)]
     pub include_vendored: bool,
+
+    /// Skip the content security audit of the local skills before adding them
+    /// to the library.
+    #[arg(long)]
+    pub no_audit: bool,
+
+    /// Refuse the whole batch (nothing is added to the library) if any skill's
+    /// content audit reaches this severity (`info` | `warning` | `critical`).
+    /// Without it, the audit is warn-only.
+    #[arg(long, value_enum, value_name = "SEVERITY")]
+    pub fail_on: Option<SeverityArg>,
 }
 
 #[derive(Args, Debug)]

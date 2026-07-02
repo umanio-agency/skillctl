@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::cli::{OnDivergence, PullArgs};
 use crate::commands::diff::{SkillStatus, classify};
-use crate::commands::shared::matches_tags;
+use crate::commands::shared::{audit_gate, matches_tags};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -33,6 +33,10 @@ struct Candidate {
     /// Cache root of the library this skill was installed from — `pull`
     /// refreshes each skill from its own provenance library, not a single one.
     library_root: PathBuf,
+    /// Whether that provenance library is the default (trusted) one. Drives the
+    /// `--no-audit` refusal: incoming content from a third-party library is
+    /// always audited, mirroring `add`.
+    library_is_default: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -180,6 +184,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
             status,
             tags,
             library_root,
+            library_is_default: library.default,
         });
     }
 
@@ -240,6 +245,25 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         ui::outro(ctx, "no skills selected")?;
         emit_json(ctx, &[]);
         return Ok(());
+    }
+
+    // The content audit can never be silenced for incoming content you don't
+    // own: `--no-audit` is refused as soon as a selected skill's provenance is a
+    // non-default (third-party) library, mirroring `add`.
+    if args.no_audit {
+        let untrusted: Vec<&str> = selected_indices
+            .iter()
+            .filter_map(|idx| pullable.iter().find(|c| c.index == *idx).copied())
+            .filter(|c| !c.library_is_default)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !untrusted.is_empty() {
+            return Err(AppError::Config(format!(
+                "refusing --no-audit: {} come(s) from a non-default (third-party) library, whose content is always audited; drop --no-audit",
+                untrusted.join(", ")
+            ))
+            .into());
+        }
     }
 
     let mut results: Vec<Value> = Vec::new();
@@ -328,6 +352,29 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
+    // Audit the *incoming* library version of each skill about to be applied
+    // (both a straight pull and a fork-local write the library content into the
+    // destination). Warn-only by default; `--fail-on` refuses the whole batch
+    // before anything is written; `--no-audit` skips (refused above for
+    // third-party provenance). A path that fails `safe_join` is left for the
+    // write loop to surface per-skill rather than aborting the batch here.
+    let audit_verdicts: HashMap<String, &'static str> = if args.no_audit {
+        HashMap::new()
+    } else {
+        let mut targets: Vec<(String, PathBuf)> = Vec::with_capacity(applies.len());
+        for apply in &applies {
+            let installed = &project_cfg.installed[apply.candidate_index];
+            if let Ok(dir) = safe_join(&apply.library_root, &installed.source_path) {
+                targets.push((installed.name.clone(), dir));
+            }
+        }
+        audit_gate(
+            ctx,
+            targets.iter().map(|(n, p)| (n.as_str(), p.as_path())),
+            args.fail_on.map(Into::into),
+        )?
+    };
+
     // Continue-on-error per apply: a single skill failing should not abort
     // the others or lose the saved state of earlier successes. The save at
     // the end of the function runs unconditionally so any successful
@@ -370,6 +417,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                         "name": installed_name,
                         "status": "pulled",
                         "source_sha": new_sha,
+                        "audit_verdict": audit_verdicts.get(installed_name.as_str()).copied(),
                     }));
                 }
                 ApplyOp::ForkLocal { local_fork_name } => {
@@ -413,6 +461,7 @@ pub fn run(args: PullArgs, ctx: &Context) -> Result<()> {
                         "fork_local": local_fork_name,
                         "fork_local_path": fork_rel.display().to_string(),
                         "source_sha": new_sha,
+                        "audit_verdict": audit_verdicts.get(installed_name.as_str()).copied(),
                     }));
                 }
             }

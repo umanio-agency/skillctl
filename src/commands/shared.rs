@@ -1,3 +1,63 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use anyhow::Result;
+
+use crate::audit::{self, Severity};
+use crate::context::Context;
+use crate::error::AppError;
+use crate::ui;
+
+/// Scan each `(name, folder)` pair's content and surface a verdict. Shared by
+/// every command that moves untrusted content across the library/project
+/// boundary (`add`, `pull`, `detect`). Findings are logged as warnings (a no-op
+/// under `--json`); when `fail_on` is set, any item reaching that severity
+/// blocks the **whole batch** (returns `AppError::Audit` → exit 5), so nothing
+/// is applied on a failed bar. Returns a map of name → verdict so callers can
+/// surface it per-item in their JSON output — the audit signal a non-interactive
+/// consumer would otherwise miss in warn-only mode.
+pub fn audit_gate<'a, I>(
+    ctx: &Context,
+    items: I,
+    fail_on: Option<Severity>,
+) -> Result<HashMap<String, &'static str>>
+where
+    I: IntoIterator<Item = (&'a str, &'a Path)>,
+{
+    let mut blocked: Vec<String> = Vec::new();
+    let mut verdicts: HashMap<String, &'static str> = HashMap::new();
+    for (name, path) in items {
+        let report = audit::scan_skill(path);
+        verdicts.insert(name.to_string(), report.verdict().as_str());
+        for f in &report.findings {
+            ui::log_warning(
+                ctx,
+                format!(
+                    "audit[{}] {}: {} ({}:{})",
+                    name,
+                    f.severity.as_str(),
+                    f.label,
+                    f.file,
+                    f.line
+                ),
+            )?;
+        }
+        if fail_on.is_some_and(|t| report.max_severity().is_some_and(|m| m >= t)) {
+            blocked.push(format!("{} ({})", name, report.verdict().as_str()));
+        }
+    }
+    if !blocked.is_empty() {
+        // `blocked` is only populated when `fail_on` is `Some`.
+        let threshold = fail_on.map(|t| t.as_str()).unwrap_or("warning");
+        return Err(AppError::Audit(format!(
+            "refusing to proceed (content audit ≥ `{threshold}`): {}",
+            blocked.join(", ")
+        ))
+        .into());
+    }
+    Ok(verdicts)
+}
+
 /// True iff the skill's tags satisfy a `--tag` filter. An empty `filter` is
 /// treated as "no filter" and matches everything. With `all_tags = false`
 /// (default) the skill needs at least one of the filter tags; with

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::DetectArgs;
-use crate::commands::shared::{matches_tags, short_hint};
+use crate::commands::shared::{audit_gate, matches_tags, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -153,6 +153,22 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
         return Ok(());
     }
 
+    // Audit the local skills before they are published to the library — a
+    // pre-publish safety net that catches secrets or dangerous content headed
+    // for a shared source. Warn-only by default; `--fail-on` refuses the whole
+    // batch (nothing is copied or committed); `--no-audit` skips.
+    let audit_verdicts: HashMap<String, &'static str> = if args.no_audit {
+        HashMap::new()
+    } else {
+        audit_gate(
+            ctx,
+            applies
+                .iter()
+                .map(|(s, _, _)| (s.name.as_str(), s.path.as_path())),
+            args.fail_on.map(Into::into),
+        )?
+    };
+
     for (skill, _lib_relative, lib_absolute) in &applies {
         fs_util::copy_dir_all(&skill.path, lib_absolute)?;
     }
@@ -206,6 +222,7 @@ pub fn run(args: DetectArgs, ctx: &Context) -> Result<()> {
             "library_path": lib_relative.display().to_string(),
             "local_path": local_destination.display().to_string(),
             "source_sha": new_sha,
+            "audit_verdict": audit_verdicts.get(skill.name.as_str()).copied(),
         }));
     }
     project_config::save(&cwd, &project_cfg)?;
