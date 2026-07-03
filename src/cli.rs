@@ -43,6 +43,9 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Scaffold a new skill: create a folder with a template SKILL.md.
     Create(CreateArgs),
+    /// Push a library's current version of a skill into every project on disk
+    /// that installed it (discovered by scanning for `.skills.toml`).
+    Propagate(PropagateArgs),
     /// Manage configured skill libraries (read sources + write targets).
     #[command(subcommand)]
     Library(LibraryCommand),
@@ -370,6 +373,29 @@ pub struct CreateArgs {
     /// from detected `skills/` folders or the presets.
     #[arg(long, value_name = "PATH")]
     pub dest: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct PropagateArgs {
+    /// Skill(s) to propagate, by name (as recorded in installers' `.skills.toml`).
+    #[arg(value_name = "SKILL", required = true)]
+    pub skills: Vec<String>,
+
+    /// Library whose current version is propagated (defaults to the default
+    /// library). Only install sites whose provenance matches this library are
+    /// touched.
+    #[arg(long, value_name = "NAME")]
+    pub from: Option<String>,
+
+    /// Directory to scan for `.skills.toml` install sites. Repeatable; at least
+    /// one is required. Nested `node_modules`/`target`/`.git` and
+    /// `.gitignore`d paths are skipped.
+    #[arg(long = "root", value_name = "PATH", required = true)]
+    pub roots: Vec<PathBuf>,
+
+    /// Preview which projects would be updated without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]

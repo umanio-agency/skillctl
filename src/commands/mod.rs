@@ -6,6 +6,7 @@ pub mod diff;
 pub mod init;
 pub mod library;
 pub mod list;
+pub mod propagate;
 pub mod pull;
 pub mod push;
 pub mod remove;

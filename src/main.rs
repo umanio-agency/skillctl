@@ -34,6 +34,7 @@ fn main() -> std::process::ExitCode {
         Command::Detect(args) => commands::detect::run(args, &ctx),
         Command::Remove(args) => commands::remove::run(args, &ctx),
         Command::Create(args) => commands::create::run(args, &ctx),
+        Command::Propagate(args) => commands::propagate::run(args, &ctx),
         Command::Library(sub) => commands::library::run(sub, &ctx),
         Command::Audit(args) => commands::audit::run(args, &ctx),
         Command::Tag(sub) => commands::tag::run(sub, &ctx),

@@ -319,6 +319,24 @@ skillctl --json create my-skill --dest .claude/skills
 
 `skillctl create` writes a template `SKILL.md` — frontmatter (`name`, `description`, and an inline `tags: […]` array when tags are given) plus a body skeleton (`# <name>`, `## Instructions`, `## Examples`) — that skillctl's own parser reads back, so the new skill is immediately visible to `detect`/`add`/`audit`. It is **project-local**: no library, git, network, or `.skills.toml` entry (a created skill is untracked until `skillctl detect` publishes it to a library). Refuses to overwrite an existing folder (exit 3). The `--json` shape is `{ "command": "create", "name": "…", "path": "…", "created": true }`.
 
+### `skillctl propagate` — push a library update into every project that has it
+
+```sh
+skillctl propagate <skill> [<skill> …] --root <path> [--root <path> …] [--from <library>] [--dry-run]
+skillctl --json propagate my-skill --root ~/Code
+```
+
+| Flag / arg | Purpose | Required |
+|---|---|---|
+| `<skill>…` | Skill name(s) to propagate, as recorded in installers' `.skills.toml`. | **Yes** (positional) |
+| `--root <path>` | Directory to scan for `.skills.toml` install sites (repeatable). Nested `node_modules`/`target`/`.git` and `.gitignore`d paths are skipped. | **Yes** (≥1) |
+| `--from <library>` | Library whose current version is propagated (defaults to the default library). Only sites whose provenance matches this library are touched. | No |
+| `--dry-run` | Report which projects *would* update without writing anything. | No |
+
+`skillctl propagate` makes a library's current version of a skill live in every *other* project that installed it — "fix once, updated everywhere" — without visiting each project by hand. It **discovers install sites by scanning `--root` for `.skills.toml`** (so it works even for projects you moved or freshly cloned — there is no central registry to keep in sync). For each discovered site whose `.skills.toml` has an entry matching the skill **and** the library's provenance (`library_url`), it runs the same classification as `pull`: a site cleanly behind the library is **updated** (its skill folder is replaced with the library HEAD version and its `source_sha` rewritten); a site with **local edits is skipped and reported** (never clobbered — go `pull`/`push` there); an up-to-date site is a noop; a site installed from a *different* library is left untouched. **No git operations on the project side.** The library cache is fetched first so HEAD is current. The `--json` shape is `{ "command": "propagate", "skills": […], "library": "…", "dry_run": bool, "results": [ { "project", "skill", "status": "updated"|"up-to-date"|"skipped"|"would-update"|"failed", … } ], "summary": { "updated", "would_update", "skipped", "up_to_date" } }`.
+
+> Scoped to explicit `--root` scanning today; configured scan roots (`[propagate] roots` in `config.toml`) and a `push --propagate` flag that propagates in the same step as a push are planned next.
+
 ## Skill identity
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.
