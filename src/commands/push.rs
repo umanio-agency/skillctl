@@ -11,6 +11,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::cli::{OnDivergence, PushArgs};
 use crate::commands::diff::{SkillStatus, classify};
+use crate::commands::propagate;
 use crate::commands::shared::matches_tags;
 use crate::config;
 use crate::context::Context;
@@ -115,6 +116,13 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .into());
     }
 
+    // Fail fast on `--propagate` with no scan roots (flag- or config-supplied)
+    // before we push anything, so the operator doesn't push then hit a config
+    // error with the fan-out un-run.
+    if args.propagate {
+        propagate::resolve_scan_roots(&args.roots, &cfg)?;
+    }
+
     // `--to` switches push into promotion mode: publish the selected skills
     // into a chosen writable library (rewriting their provenance), rather than
     // pushing each back to where it came from.
@@ -149,7 +157,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
             ctx,
             "no skills installed in this project (.skills.toml is empty)",
         )?;
-        emit_json(ctx, &[], None);
+        emit_json(ctx, &[], None, None);
         return Ok(());
     }
 
@@ -275,14 +283,14 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
 
     if pushable.is_empty() {
         ui::outro(ctx, "nothing to push")?;
-        emit_json(ctx, &[], None);
+        emit_json(ctx, &[], None, None);
         return Ok(());
     }
 
     let selected_indices = select_pushable(&args, ctx, &pushable)?;
     if selected_indices.is_empty() {
         ui::outro(ctx, "no skills selected")?;
-        emit_json(ctx, &[], None);
+        emit_json(ctx, &[], None, None);
         return Ok(());
     }
 
@@ -427,7 +435,7 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
 
     if applies.is_empty() {
         ui::outro(ctx, "nothing to push after conflict resolution")?;
-        emit_json(ctx, &results, None);
+        emit_json(ctx, &results, None, None);
         return Ok(());
     }
 
@@ -468,6 +476,16 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         }
     }
 
+    // With `--propagate`, fan each just-pushed update out to every other
+    // project on disk that installed it from the same library. Runs after the
+    // library groups are committed + pushed so the propagated content is the
+    // new HEAD.
+    let propagated = if args.propagate {
+        propagate_after_push(ctx, &args, &cfg, &cwd, &project_cfg, &results)?
+    } else {
+        Vec::new()
+    };
+
     let pushed = results.iter().filter(|r| r["status"] == "pushed").count();
     let forked = results.iter().filter(|r| r["status"] == "forked").count();
     let pr_opened = results
@@ -475,6 +493,10 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         .filter(|r| r["status"] == "pr_opened")
         .count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
+    let prop_updated = propagated
+        .iter()
+        .filter(|r| r["status"] == "updated")
+        .count();
     let mut parts = Vec::new();
     if pushed > 0 {
         parts.push(format!("pushed {pushed}"));
@@ -488,6 +510,9 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
     if skipped > 0 {
         parts.push(format!("skipped {skipped}"));
     }
+    if prop_updated > 0 {
+        parts.push(format!("propagated to {prop_updated} project(s)"));
+    }
     let summary = if parts.is_empty() {
         "nothing to push".to_string()
     } else {
@@ -498,8 +523,99 @@ pub fn run(args: PushArgs, ctx: &Context) -> Result<()> {
         [one] => Some((one.0.as_str(), one.1.as_str())),
         _ => None,
     };
-    emit_json(ctx, &results, commit_for_json);
+    emit_json(
+        ctx,
+        &results,
+        commit_for_json,
+        if args.propagate {
+            Some(propagated.as_slice())
+        } else {
+            None
+        },
+    );
     Ok(())
+}
+
+/// After a successful round-trip push, propagate each pushed update to every
+/// other install site on disk. Only `pushed` (update) results propagate — forks
+/// and `--to` promotions are new skills / new provenance and never fan out.
+/// Pushed skills are grouped by their owning library (each is a separate repo
+/// with its own HEAD); the project that just pushed is skipped by canonical
+/// path (it's already up to date and still holds its own lock). All configured
+/// caches are already locked by `run`, so this only takes per-site project
+/// locks.
+fn propagate_after_push(
+    ctx: &Context,
+    args: &PushArgs,
+    cfg: &config::Config,
+    cwd: &Path,
+    project_cfg: &project_config::ProjectConfig,
+    results: &[Value],
+) -> Result<Vec<Value>> {
+    let pushed_names: Vec<String> = results
+        .iter()
+        .filter(|r| r["status"] == "pushed")
+        .filter_map(|r| r["name"].as_str().map(str::to_string))
+        .collect();
+    if pushed_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let roots = propagate::resolve_scan_roots(&args.roots, cfg)?;
+    let cwd_canonical = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+
+    // Group the pushed skills by the library they belong to.
+    let mut by_library: std::collections::BTreeMap<String, (config::Library, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for name in &pushed_names {
+        let Some(entry) = project_cfg.installed.iter().find(|i| &i.name == name) else {
+            continue;
+        };
+        let Some(library) =
+            cfg.resolve_provenance(entry.library.as_deref(), entry.library_url.as_deref())
+        else {
+            continue;
+        };
+        by_library
+            .entry(library.name.clone())
+            .or_insert_with(|| (library.clone(), Vec::new()))
+            .1
+            .push(name.clone());
+    }
+
+    let mut out: Vec<Value> = Vec::new();
+    for (_lib_name, (library, names)) in by_library {
+        let library_root = match config::library_cache_path(&library.url) {
+            Ok(p) if p.exists() => p,
+            _ => continue,
+        };
+        let head_sha = match git::head_sha(&library_root) {
+            Ok(s) => s,
+            Err(e) => {
+                ui::log_warning(
+                    ctx,
+                    format!(
+                        "could not read HEAD of `{}` for propagation: {e}",
+                        library.name
+                    ),
+                )?;
+                continue;
+            }
+        };
+        let wanted: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+        let mut lib_results = propagate::propagate_core(
+            ctx,
+            &library,
+            &library_root,
+            &head_sha,
+            &wanted,
+            &roots,
+            false,
+            Some(&cwd_canonical),
+        )?;
+        out.append(&mut lib_results);
+    }
+    Ok(out)
 }
 
 /// Apply, commit, and push one library group. Mutates `project_cfg` in memory
@@ -1013,14 +1129,14 @@ fn run_promote(args: &PushArgs, ctx: &Context, cfg: &config::Config) -> Result<(
             ctx,
             "no skills installed in this project (.skills.toml is empty)",
         )?;
-        emit_json(ctx, &[], None);
+        emit_json(ctx, &[], None, None);
         return Ok(());
     }
 
     let selected = select_for_promotion(args, ctx, &cwd, &project_cfg)?;
     if selected.is_empty() {
         ui::outro(ctx, "no skills selected")?;
-        emit_json(ctx, &[], None);
+        emit_json(ctx, &[], None, None);
         return Ok(());
     }
 
@@ -1100,7 +1216,7 @@ fn run_promote(args: &PushArgs, ctx: &Context, cfg: &config::Config) -> Result<(
 
     if plans.is_empty() {
         ui::outro(ctx, "nothing to promote")?;
-        emit_json(ctx, &results, None);
+        emit_json(ctx, &results, None, None);
         return Ok(());
     }
 
@@ -1131,7 +1247,7 @@ fn run_promote(args: &PushArgs, ctx: &Context, cfg: &config::Config) -> Result<(
         || !git::has_staged_changes(&target_root).map_err(|e| AppError::Git(e.to_string()))?
     {
         ui::outro(ctx, "nothing promoted")?;
-        emit_json(ctx, &results, None);
+        emit_json(ctx, &results, None, None);
         return Ok(());
     }
 
@@ -1233,7 +1349,12 @@ fn run_promote(args: &PushArgs, ctx: &Context, cfg: &config::Config) -> Result<(
         format!("promoted {promoted} skill(s)")
     };
     ui::outro(ctx, summary)?;
-    emit_json(ctx, &results, Some((new_sha.as_str(), message.as_str())));
+    emit_json(
+        ctx,
+        &results,
+        Some((new_sha.as_str(), message.as_str())),
+        None,
+    );
     Ok(())
 }
 
@@ -1343,7 +1464,12 @@ fn select_for_promotion(
     prompt.interact()
 }
 
-fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
+fn emit_json(
+    ctx: &Context,
+    results: &[Value],
+    commit: Option<(&str, &str)>,
+    propagated: Option<&[Value]>,
+) {
     if !ctx.json {
         return;
     }
@@ -1356,7 +1482,7 @@ fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
         .count();
     let skipped = results.iter().filter(|r| r["status"] == "skipped").count();
     let commit_value = commit.map(|(sha, message)| json!({"sha": sha, "message": message}));
-    let out = json!({
+    let mut out = json!({
         "command": "push",
         "results": results,
         "commit": commit_value,
@@ -1368,6 +1494,19 @@ fn emit_json(ctx: &Context, results: &[Value], commit: Option<(&str, &str)>) {
             "skipped": skipped,
         },
     });
+    // Only present when `--propagate` ran, so a plain push's JSON is unchanged.
+    if let Some(prop) = propagated {
+        let updated = prop.iter().filter(|r| r["status"] == "updated").count();
+        let would = prop
+            .iter()
+            .filter(|r| r["status"] == "would-update")
+            .count();
+        let sk = prop.iter().filter(|r| r["status"] == "skipped").count();
+        out["propagated"] = json!({
+            "results": prop,
+            "summary": { "updated": updated, "would_update": would, "skipped": sk },
+        });
+    }
     println!("{out}");
 }
 

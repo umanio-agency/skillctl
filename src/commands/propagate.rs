@@ -50,41 +50,17 @@ pub fn run(args: PropagateArgs, ctx: &Context) -> Result<()> {
     let head_sha = git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
 
     let wanted: HashSet<&str> = args.skills.iter().map(String::as_str).collect();
-    let sites = discover_sites(&args.roots);
-    ui::log_info(
+    let roots = resolve_scan_roots(&args.roots, &cfg)?;
+    let results = propagate_core(
         ctx,
-        format!(
-            "scanned {} root(s); found {} project(s) with a .skills.toml",
-            args.roots.len(),
-            sites.len()
-        ),
+        &library,
+        &library_root,
+        &head_sha,
+        &wanted,
+        &roots,
+        args.dry_run,
+        None,
     )?;
-
-    let mut results: Vec<Value> = Vec::new();
-    for site in &sites {
-        match process_site(
-            ctx,
-            site,
-            &library,
-            &library_root,
-            &head_sha,
-            &wanted,
-            args.dry_run,
-        ) {
-            Ok(mut site_results) => results.append(&mut site_results),
-            Err(e) => {
-                ui::log_warning(
-                    ctx,
-                    format!("{}: skipped ({e})", fs_util::display_path(site)),
-                )?;
-                results.push(json!({
-                    "project": fs_util::display_path(site),
-                    "status": "site-error",
-                    "reason": e.to_string(),
-                }));
-            }
-        }
-    }
 
     let updated = results.iter().filter(|r| r["status"] == "updated").count();
     let would = results
@@ -124,6 +100,77 @@ pub fn run(args: PropagateArgs, ctx: &Context) -> Result<()> {
     ui::outro(ctx, summary)?;
     emit_json(ctx, &args, &library.name, &results);
     Ok(())
+}
+
+/// Resolve which directories to scan for install sites: the `--root` flags
+/// when given, otherwise the configured `[propagate] roots`. Errors when
+/// neither supplies a root so the caller never scans nothing by accident.
+pub fn resolve_scan_roots(cli_roots: &[PathBuf], cfg: &config::Config) -> Result<Vec<PathBuf>> {
+    if !cli_roots.is_empty() {
+        return Ok(cli_roots.to_vec());
+    }
+    if !cfg.propagate.roots.is_empty() {
+        return Ok(cfg.propagate.roots.clone());
+    }
+    Err(AppError::Config(
+        "no scan roots — pass `--root <path>` (repeatable) or set `[propagate] roots` in config.toml"
+            .into(),
+    )
+    .into())
+}
+
+/// Fan `library`'s current version of the `wanted` skills out to every install
+/// site discovered under `roots`. The caller is responsible for holding the
+/// cache lock and resolving `head_sha` (the version to propagate) — this walks,
+/// classifies, and applies but never touches the library. `skip_site`, when
+/// set, is a canonicalized project path to exclude: `push --propagate` passes
+/// the project it just wrote, which is already up to date and whose project
+/// lock is still held.
+#[allow(clippy::too_many_arguments)]
+pub fn propagate_core(
+    ctx: &Context,
+    library: &Library,
+    library_root: &Path,
+    head_sha: &str,
+    wanted: &HashSet<&str>,
+    roots: &[PathBuf],
+    dry_run: bool,
+    skip_site: Option<&Path>,
+) -> Result<Vec<Value>> {
+    let sites = discover_sites(roots);
+    ui::log_info(
+        ctx,
+        format!(
+            "scanned {} root(s); found {} project(s) with a .skills.toml",
+            roots.len(),
+            sites.len()
+        ),
+    )?;
+
+    let mut results: Vec<Value> = Vec::new();
+    for site in &sites {
+        if let Some(skip) = skip_site {
+            let canonical = std::fs::canonicalize(site).unwrap_or_else(|_| site.clone());
+            if canonical == skip {
+                continue;
+            }
+        }
+        match process_site(ctx, site, library, library_root, head_sha, wanted, dry_run) {
+            Ok(mut site_results) => results.append(&mut site_results),
+            Err(e) => {
+                ui::log_warning(
+                    ctx,
+                    format!("{}: skipped ({e})", fs_util::display_path(site)),
+                )?;
+                results.push(json!({
+                    "project": fs_util::display_path(site),
+                    "status": "site-error",
+                    "reason": e.to_string(),
+                }));
+            }
+        }
+    }
+    Ok(results)
 }
 
 /// Walk each root for files literally named `.skills.toml`, returning the

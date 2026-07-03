@@ -254,6 +254,18 @@ pub struct PushArgs {
     /// Always implied in non-interactive mode.
     #[arg(long)]
     pub yes: bool,
+
+    /// After a successful push, propagate each pushed skill's new version to
+    /// every OTHER project on disk that installed it from the same library
+    /// (the same fan-out as `skillctl propagate`). Only round-trip updates
+    /// propagate — forks and `--to` promotions are excluded.
+    #[arg(long, conflicts_with = "to")]
+    pub propagate: bool,
+
+    /// Directory to scan for `.skills.toml` install sites when `--propagate`
+    /// is set. Repeatable; falls back to `[propagate] roots` in config.toml.
+    #[arg(long = "root", value_name = "PATH", requires = "propagate")]
+    pub roots: Vec<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -387,10 +399,10 @@ pub struct PropagateArgs {
     #[arg(long, value_name = "NAME")]
     pub from: Option<String>,
 
-    /// Directory to scan for `.skills.toml` install sites. Repeatable; at least
-    /// one is required. Nested `node_modules`/`target`/`.git` and
-    /// `.gitignore`d paths are skipped.
-    #[arg(long = "root", value_name = "PATH", required = true)]
+    /// Directory to scan for `.skills.toml` install sites. Repeatable; falls
+    /// back to `[propagate] roots` in config.toml when omitted. Nested
+    /// `node_modules`/`target`/`.git` and `.gitignore`d paths are skipped.
+    #[arg(long = "root", value_name = "PATH")]
     pub roots: Vec<PathBuf>,
 
     /// Preview which projects would be updated without writing anything.

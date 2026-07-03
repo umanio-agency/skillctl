@@ -49,6 +49,25 @@ pub struct Config {
     /// Serialized as a TOML array of `[[library]]` tables.
     #[serde(default, rename = "library")]
     pub libraries: Vec<Library>,
+    /// Optional `[propagate]` section. Omitted from the serialized config while
+    /// empty, so a config that never uses propagation stays byte-clean.
+    #[serde(default, skip_serializing_if = "PropagateConfig::is_empty")]
+    pub propagate: PropagateConfig,
+}
+
+/// Settings for `skillctl propagate` (and `push --propagate`). Only carries the
+/// default scan roots for now — the directories walked for `.skills.toml`
+/// install sites when `--root` is not passed on the command line.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PropagateConfig {
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
+}
+
+impl PropagateConfig {
+    fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +340,7 @@ impl LegacyConfig {
                     access: Access::Write,
                     default: true,
                 }],
+                ..Config::default()
             },
             None => Config::default(),
         }
@@ -632,6 +652,7 @@ default = true
                     default: false,
                 },
             ],
+            ..Config::default()
         };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
@@ -644,6 +665,7 @@ default = true
     fn validate_allows_distinct_repos() {
         let cfg = Config {
             libraries: vec![lib("a", true), lib("b", false)],
+            ..Config::default()
         };
         assert!(cfg.validate().is_ok());
     }
@@ -657,6 +679,7 @@ default = true
                 access: Access::Read,
                 default: true,
             }],
+            ..Config::default()
         };
         assert!(cfg.validate().is_err());
     }
@@ -670,6 +693,7 @@ default = true
                 access: Access::Read,
                 default: true,
             }],
+            ..Config::default()
         };
         assert!(cfg.validate().is_err());
     }
@@ -680,6 +704,7 @@ default = true
         // ever computes a path or writes — so this never hits the real FS.
         let cfg = Config {
             libraries: vec![lib("a", true), lib("b", true)],
+            ..Config::default()
         };
         assert!(save(&cfg).is_err());
     }
@@ -930,6 +955,60 @@ default = true
         assert_eq!(
             reparsed.default_library().unwrap().name,
             PRIMARY_LIBRARY_NAME
+        );
+    }
+
+    #[test]
+    fn parse_reads_propagate_roots() {
+        let raw = r#"
+[[library]]
+name = "personal"
+url = "https://github.com/o/r"
+default = true
+
+[propagate]
+roots = ["~/code", "/srv/projects"]
+"#;
+        let cfg = parse(raw).unwrap();
+        assert_eq!(
+            cfg.propagate.roots,
+            vec![PathBuf::from("~/code"), PathBuf::from("/srv/projects")]
+        );
+    }
+
+    #[test]
+    fn parse_without_propagate_has_empty_roots() {
+        let cfg = parse("[library]\nurl = \"https://github.com/o/r\"\n").unwrap();
+        assert!(cfg.propagate.roots.is_empty());
+    }
+
+    #[test]
+    fn empty_propagate_is_omitted_from_serialized_config() {
+        let cfg = Config {
+            libraries: vec![lib("a", true)],
+            ..Config::default()
+        };
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !raw.contains("[propagate]"),
+            "empty propagate section must not be serialized, got:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn propagate_roots_roundtrip_through_serialization() {
+        let cfg = Config {
+            libraries: vec![lib("a", true)],
+            propagate: PropagateConfig {
+                roots: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            },
+        };
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        assert!(raw.contains("[propagate]"), "got:\n{raw}");
+        let reparsed = parse(&raw).unwrap();
+        assert_eq!(
+            reparsed.propagate.roots,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
         );
     }
 }

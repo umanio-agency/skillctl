@@ -191,6 +191,8 @@ skillctl push --tag <tag> [--tag <tag> …] [--all-tags]
 | `--message <text>` | Override the auto-generated commit message. For a `pr`-access library it is also the PR/MR description. |
 | `--pr-title <title>` | Title for the PR/MR opened against a `pr`-access library (default: auto-generated). Ignored for `write` libraries. |
 | `--yes` | Skip the interactive PR/MR confirmation (open it without prompting). Always implied in non-interactive mode. |
+| `--propagate` | After the push succeeds, fan each pushed update out to every **other** project on disk that installed it from the same library (same engine as `skillctl propagate`). Mutually exclusive with `--to`. |
+| `--root <path>` | Directory to scan for install sites when `--propagate` is set (repeatable). Requires `--propagate`; falls back to `[propagate] roots` in `config.toml` when omitted. |
 
 For each pushable skill, `skillctl push` runs a content diff (via git blob hashes) and applies the chosen strategy. `push` **follows provenance**: each skill is written back to the library it was installed from.
 - For a `write` library: commits and pushes to its default branch, **one commit per library** (a run touching several makes several commits); each pushed `.skills.toml` entry's `source_sha` is rewritten to that library's new HEAD. In `--json`, `commit` is the single commit when exactly one `write` library was pushed, otherwise `null` (each result carries its `source_sha`).
@@ -201,6 +203,8 @@ Skills from `read` libraries, and skills whose provenance is no longer configure
 **Promotion** (`push --to <writable-library>`): publishes the selected skills' local content into `<library>` (regardless of where they came from) and rewrites their `.skills.toml` provenance to it — the way to contribute a skill installed from a read-only source. Each skill lands at its current `source_path` in the target; if that path is already taken there, the `--on-divergence` policy decides — `overwrite` (replace the target's version), `fork` (add as a new skill under `<name>-<--fork-suffix>`, renaming the local folder), or `skip` (default non-interactively; interactive shows a three-way prompt). The target must be `write`-access (`read` is refused; `pr` promotion isn't supported yet). JSON results carry `"status":"promoted"` (+ `"new_name"` when forked).
 
 **Fork** (creating a new library skill from local edits) is supported non-interactively via `--on-divergence fork --fork-suffix <s>`: every divergent (or library-missing) skill is forked under the name `<original>-<suffix>`.
+
+**Propagate-on-push** (`push --propagate`): once the push has committed and pushed, each just-pushed **update** is fanned out to every other install site under the scan roots — a one-step "push here, update everywhere". Only round-trip updates propagate; forks and `--to` promotions never do. The project you pushed from is skipped (it's already at the new HEAD). Scan roots come from `--root` (repeatable) or, when omitted, `[propagate] roots` in `config.toml`; if neither supplies a root the command fails fast (**before** pushing anything). With `--json`, a `"propagated"` block is added alongside `results` — `{ "results": [ { "project", "skill", "status": "updated"|"skipped"|… } ], "summary": { "updated", "would_update", "skipped" } }` — and only when `--propagate` was passed.
 
 ### `skillctl pull` — refresh installed skills from the library
 
@@ -324,18 +328,28 @@ skillctl --json create my-skill --dest .claude/skills
 ```sh
 skillctl propagate <skill> [<skill> …] --root <path> [--root <path> …] [--from <library>] [--dry-run]
 skillctl --json propagate my-skill --root ~/Code
+skillctl propagate my-skill            # scan roots taken from [propagate] roots in config.toml
 ```
 
 | Flag / arg | Purpose | Required |
 |---|---|---|
 | `<skill>…` | Skill name(s) to propagate, as recorded in installers' `.skills.toml`. | **Yes** (positional) |
-| `--root <path>` | Directory to scan for `.skills.toml` install sites (repeatable). Nested `node_modules`/`target`/`.git` and `.gitignore`d paths are skipped. | **Yes** (≥1) |
+| `--root <path>` | Directory to scan for `.skills.toml` install sites (repeatable). Nested `node_modules`/`target`/`.git` and `.gitignore`d paths are skipped. | Falls back to `[propagate] roots` in `config.toml`; errors (exit 2) if neither is set |
 | `--from <library>` | Library whose current version is propagated (defaults to the default library). Only sites whose provenance matches this library are touched. | No |
 | `--dry-run` | Report which projects *would* update without writing anything. | No |
 
-`skillctl propagate` makes a library's current version of a skill live in every *other* project that installed it — "fix once, updated everywhere" — without visiting each project by hand. It **discovers install sites by scanning `--root` for `.skills.toml`** (so it works even for projects you moved or freshly cloned — there is no central registry to keep in sync). For each discovered site whose `.skills.toml` has an entry matching the skill **and** the library's provenance (`library_url`), it runs the same classification as `pull`: a site cleanly behind the library is **updated** (its skill folder is replaced with the library HEAD version and its `source_sha` rewritten); a site with **local edits is skipped and reported** (never clobbered — go `pull`/`push` there); an up-to-date site is a noop; a site installed from a *different* library is left untouched. **No git operations on the project side.** The library cache is fetched first so HEAD is current. The `--json` shape is `{ "command": "propagate", "skills": […], "library": "…", "dry_run": bool, "results": [ { "project", "skill", "status": "updated"|"up-to-date"|"skipped"|"would-update"|"failed", … } ], "summary": { "updated", "would_update", "skipped", "up_to_date" } }`.
+`skillctl propagate` makes a library's current version of a skill live in every *other* project that installed it — "fix once, updated everywhere" — without visiting each project by hand. It **discovers install sites by scanning the roots for `.skills.toml`** (so it works even for projects you moved or freshly cloned — there is no central registry to keep in sync). Roots come from `--root` (repeatable) or, when omitted, the configured `[propagate] roots` (see below); if neither supplies a root it errors (exit 2). For each discovered site whose `.skills.toml` has an entry matching the skill **and** the library's provenance (`library_url`), it runs the same classification as `pull`: a site cleanly behind the library is **updated** (its skill folder is replaced with the library HEAD version and its `source_sha` rewritten); a site with **local edits is skipped and reported** (never clobbered — go `pull`/`push` there); an up-to-date site is a noop; a site installed from a *different* library is left untouched. **No git operations on the project side.** The library cache is fetched first so HEAD is current. The `--json` shape is `{ "command": "propagate", "skills": […], "library": "…", "dry_run": bool, "results": [ { "project", "skill", "status": "updated"|"up-to-date"|"skipped"|"would-update"|"failed", … } ], "summary": { "updated", "would_update", "skipped", "up_to_date" } }`.
 
-> Scoped to explicit `--root` scanning today; configured scan roots (`[propagate] roots` in `config.toml`) and a `push --propagate` flag that propagates in the same step as a push are planned next.
+**Configured scan roots.** Add a `[propagate]` section to `config.toml` to make `--root` optional for both `propagate` and `push --propagate`:
+
+```toml
+[propagate]
+roots = ["~/Code", "/srv/projects"]
+```
+
+The section is omitted from the file while empty, so a config that never propagates stays byte-clean. `--root` on the command line overrides the configured roots for that run.
+
+To propagate **in the same step as a push**, use `push --propagate` (see the push section) — it pushes your local edits, then fans the new version out to every other install site under the scan roots.
 
 ## Skill identity
 
