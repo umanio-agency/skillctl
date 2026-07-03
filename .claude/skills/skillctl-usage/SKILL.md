@@ -302,6 +302,23 @@ skillctl --json tag add code-review --skill my-skill
 
 `skillctl tag` rewrites the `tags:` line in the named skill's `SKILL.md` frontmatter — **project-local**, no git or network (like `remove`). `add` unions the new tags onto the existing set (de-duplicated); `remove` drops them; removing the last tag deletes the `tags:` field. Everything else in the file (other frontmatter keys, the body, line endings) is preserved, and the write is atomic. Because `push`/`pull`/`list` read tags from the local `SKILL.md`, a retag takes effect immediately and propagates to the library on the next `push`. The `--json` shape is `{ "command": "tag", "skill": "…", "tags": ["…"], "changed": true|false }`.
 
+### `skillctl create` — scaffold a new local skill
+
+```sh
+skillctl create <name> --dest <path> [--description <text>] [--tag <tag> …]
+skillctl create video-cutter --dest .claude/skills --description "Cut and trim videos." --tag video
+skillctl --json create my-skill --dest .claude/skills
+```
+
+| Flag / arg | Purpose | Required in non-interactive |
+|---|---|---|
+| `<name>` | Name of the new skill — also its folder name. A simple token (no `/`, `\`, `.`/`..`, or control characters). | **Yes** (positional) |
+| `--dest <path>` | Parent folder the skill is created under, relative to the project root (e.g. `.claude/skills`). The skill lands at `<dest>/<name>/SKILL.md`. Interactive mode picks from detected `skills/` folders or the presets. | **Yes** |
+| `--description <text>` | One-line description for the frontmatter (what the skill does / when to use it). A `TODO:` placeholder is written if omitted. | No |
+| `--tag <tag>` | Tag added to the frontmatter `tags:` array. Repeatable. | No |
+
+`skillctl create` writes a template `SKILL.md` — frontmatter (`name`, `description`, and an inline `tags: […]` array when tags are given) plus a body skeleton (`# <name>`, `## Instructions`, `## Examples`) — that skillctl's own parser reads back, so the new skill is immediately visible to `detect`/`add`/`audit`. It is **project-local**: no library, git, network, or `.skills.toml` entry (a created skill is untracked until `skillctl detect` publishes it to a library). Refuses to overwrite an existing folder (exit 3). The `--json` shape is `{ "command": "create", "name": "…", "path": "…", "created": true }`.
+
 ## Skill identity
 
 A "skill" is any folder containing a file literally named `SKILL.md`. The skill's `name` comes from the YAML frontmatter `name:` field at the top of `SKILL.md`; if absent, the folder name is used. All `--skill <name>` flags match against this resolved name.

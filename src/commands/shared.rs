@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use cliclack::select;
+use cliclack::{input, select};
 
 use crate::audit::{self, Finding, Severity};
 use crate::context::Context;
 use crate::error::AppError;
-use crate::ui;
+use crate::{fs_util, skill, ui};
 
 /// Outcome of the pre-apply content audit for a batch of skills.
 pub enum AuditGate {
@@ -260,6 +260,120 @@ pub fn short_hint(desc: &str) -> String {
     }
     let truncated: String = normalized.chars().take(CAP).collect();
     format!("{truncated}…")
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum DestChoice {
+    Existing(PathBuf),
+    Preset { label: &'static str, path: PathBuf },
+    Custom,
+}
+
+/// Resolve the destination folder that skills land in (for `add`) or that a new
+/// skill is scaffolded under (for `create`). `dest` is the `--dest` flag value:
+/// when present it is used verbatim after safety checks (reject `..` always;
+/// reject absolute paths in non-interactive mode — flag values may be
+/// agent-supplied). When absent, non-interactive fails fast; interactive offers
+/// the detected `skills/` folders (or the four presets) plus a custom path,
+/// titled `picker_title`.
+pub fn resolve_dest_root(
+    dest: Option<&Path>,
+    ctx: &Context,
+    cwd: &Path,
+    picker_title: &str,
+) -> Result<PathBuf> {
+    if let Some(dest) = dest {
+        for component in dest.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(AppError::Config(format!(
+                    "invalid --dest `{}`: parent traversal (`..`) is not allowed",
+                    dest.display()
+                ))
+                .into());
+            }
+        }
+        if dest.is_absolute() && !ctx.interactive {
+            return Err(AppError::Config(format!(
+                "invalid --dest `{}`: absolute paths are not allowed in non-interactive mode (the operator's flag values may be agent-supplied; use a path relative to the current directory)",
+                dest.display()
+            ))
+            .into());
+        }
+        return Ok(dest.to_path_buf());
+    }
+    if !ctx.interactive {
+        return Err(AppError::Config("no destination — pass --dest <path>".into()).into());
+    }
+    let existing = skill::find_skills_folders(cwd)?
+        .into_iter()
+        .map(fs_util::strip_dot_prefix)
+        .collect();
+    pick_destination_interactive(existing, picker_title)
+}
+
+fn pick_destination_interactive(existing: Vec<PathBuf>, title: &str) -> Result<PathBuf> {
+    let mut prompt = select(title);
+
+    if existing.is_empty() {
+        prompt = prompt
+            .item(
+                DestChoice::Preset {
+                    label: "claude",
+                    path: PathBuf::from(".claude/skills"),
+                },
+                "claude",
+                ".claude/skills",
+            )
+            .item(
+                DestChoice::Preset {
+                    label: "codex",
+                    path: PathBuf::from(".codex/skills"),
+                },
+                "codex",
+                ".codex/skills",
+            )
+            .item(
+                DestChoice::Preset {
+                    label: "cursor",
+                    path: PathBuf::from(".cursor/skills"),
+                },
+                "cursor",
+                ".cursor/skills",
+            )
+            .item(
+                DestChoice::Preset {
+                    label: "agents",
+                    path: PathBuf::from(".agents/skills"),
+                },
+                "agents",
+                ".agents/skills",
+            );
+    } else {
+        for p in existing {
+            let display = p.display().to_string();
+            prompt = prompt.item(DestChoice::Existing(p), display, "");
+        }
+    }
+    prompt = prompt.item(DestChoice::Custom, "Custom path…", "type your own");
+
+    let answer = prompt.interact()?;
+    match answer {
+        DestChoice::Existing(p) => Ok(p),
+        DestChoice::Preset { path, .. } => Ok(path),
+        DestChoice::Custom => {
+            let typed: String = input("Path")
+                .placeholder(".claude/skills")
+                .validate(|s: &String| {
+                    if s.trim().is_empty() {
+                        Err("path cannot be empty")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact()?;
+            Ok(PathBuf::from(typed.trim()))
+        }
+    }
 }
 
 #[cfg(test)]

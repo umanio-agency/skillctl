@@ -86,7 +86,7 @@ fn find_skill(cwd: &std::path::Path, name: &str) -> Result<Skill> {
 
 /// A tag must be a single-line token with no structural characters, so it
 /// round-trips cleanly through the inline `tags: [..]` frontmatter form.
-fn validate_tag(tag: &str) -> Result<()> {
+pub(crate) fn validate_tag(tag: &str) -> Result<()> {
     validate_identifier("tag", tag)?;
     if tag.trim().is_empty() {
         return Err(AppError::Config("a tag cannot be empty".into()).into());

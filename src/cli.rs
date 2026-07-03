@@ -41,6 +41,8 @@ pub enum Command {
     Detect(DetectArgs),
     /// Remove skills from the current project (folder + any .skills.toml entry).
     Remove(RemoveArgs),
+    /// Scaffold a new skill: create a folder with a template SKILL.md.
+    Create(CreateArgs),
     /// Manage configured skill libraries (read sources + write targets).
     #[command(subcommand)]
     Library(LibraryCommand),
@@ -346,6 +348,28 @@ pub struct DetectArgs {
     /// Without it, the audit is warn-only.
     #[arg(long, value_enum, value_name = "SEVERITY")]
     pub fail_on: Option<SeverityArg>,
+}
+
+#[derive(Args, Debug)]
+pub struct CreateArgs {
+    /// Name of the new skill — also its folder name. Must be a simple token
+    /// (no `/`, `\`, `.`/`..`, or control characters).
+    pub name: String,
+
+    /// One-line description for the SKILL.md frontmatter — what the skill does
+    /// and when to use it. A placeholder is written if omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+
+    /// Tag to add to the new skill's frontmatter. Repeatable.
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+
+    /// Parent folder for the new skill, relative to the project root (e.g.
+    /// `.claude/skills`). Required in non-interactive mode; interactive picks
+    /// from detected `skills/` folders or the presets.
+    #[arg(long, value_name = "PATH")]
+    pub dest: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

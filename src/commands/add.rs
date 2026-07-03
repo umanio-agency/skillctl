@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::cli::{AddArgs, OnConflict};
-use crate::commands::shared::{AuditGate, audit_gate, matches_tags, short_hint};
+use crate::commands::shared::{AuditGate, audit_gate, matches_tags, resolve_dest_root, short_hint};
 use crate::config;
 use crate::context::Context;
 use crate::error::AppError;
@@ -23,13 +23,6 @@ use crate::path_safety::normalize_lexical;
 use crate::project_config::{self, InstalledSkill};
 use crate::skill::{self, Skill};
 use crate::ui;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum DestChoice {
-    Existing(PathBuf),
-    Preset { label: &'static str, path: PathBuf },
-    Custom,
-}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum ConflictAction {
@@ -159,7 +152,7 @@ pub fn run(args: AddArgs, ctx: &Context) -> Result<()> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     // Serialise concurrent skillctl runs on this project's .skills.toml.
     let _project_lock = lock::acquire_exclusive(&cwd, "project")?;
-    let dest_root = resolve_destination(&args, ctx, &cwd)?;
+    let dest_root = resolve_dest_root(args.dest.as_deref(), ctx, &cwd, "Install destination")?;
     let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
 
     let source_sha = git::head_sha(&library_root).map_err(|e| AppError::Git(e.to_string()))?;
@@ -754,7 +747,7 @@ fn install_multi_source(
     selected: Vec<(Skill, config::Library, PathBuf)>,
 ) -> Result<()> {
     let cwd = cwd.to_path_buf();
-    let dest_root = resolve_destination(args, ctx, &cwd)?;
+    let dest_root = resolve_dest_root(args.dest.as_deref(), ctx, &cwd, "Install destination")?;
     let conflict_policy: Option<ConflictAction> = args.on_conflict.map(Into::into);
     let mut project_cfg = project_config::load(&cwd)?;
 
@@ -1085,41 +1078,6 @@ fn select_skills(args: &AddArgs, ctx: &Context, skills: &[Skill]) -> Result<Vec<
     prompt.interact()
 }
 
-fn resolve_destination(args: &AddArgs, ctx: &Context, cwd: &std::path::Path) -> Result<PathBuf> {
-    if let Some(dest) = &args.dest {
-        // Reject parent traversal unconditionally — there is no legitimate
-        // workflow that needs `..` in `--dest`. Reject absolute paths in
-        // non-interactive mode (agent-mode threat model: flag values may be
-        // attacker-supplied via the agent's prompt). In interactive mode the
-        // operator is typing the value themselves, so absolute is allowed.
-        for component in dest.components() {
-            if matches!(component, std::path::Component::ParentDir) {
-                return Err(AppError::Config(format!(
-                    "invalid --dest `{}`: parent traversal (`..`) is not allowed",
-                    dest.display()
-                ))
-                .into());
-            }
-        }
-        if dest.is_absolute() && !ctx.interactive {
-            return Err(AppError::Config(format!(
-                "invalid --dest `{}`: absolute paths are not allowed in non-interactive mode (the operator's flag values may be agent-supplied; use a path relative to the current directory)",
-                dest.display()
-            ))
-            .into());
-        }
-        return Ok(dest.clone());
-    }
-    if !ctx.interactive {
-        return Err(AppError::Config("no install destination — pass --dest <path>".into()).into());
-    }
-    let existing = skill::find_skills_folders(cwd)?
-        .into_iter()
-        .map(fs_util::strip_dot_prefix)
-        .collect();
-    pick_destination_interactive(existing)
-}
-
 fn resolve_conflict(
     ctx: &Context,
     dest: &std::path::Path,
@@ -1155,71 +1113,6 @@ fn resolve_conflict(
         "stop now and save what's been installed so far",
     )
     .interact()?)
-}
-
-fn pick_destination_interactive(existing: Vec<PathBuf>) -> Result<PathBuf> {
-    let mut prompt = select("Install destination");
-
-    if existing.is_empty() {
-        prompt = prompt
-            .item(
-                DestChoice::Preset {
-                    label: "claude",
-                    path: PathBuf::from(".claude/skills"),
-                },
-                "claude",
-                ".claude/skills",
-            )
-            .item(
-                DestChoice::Preset {
-                    label: "codex",
-                    path: PathBuf::from(".codex/skills"),
-                },
-                "codex",
-                ".codex/skills",
-            )
-            .item(
-                DestChoice::Preset {
-                    label: "cursor",
-                    path: PathBuf::from(".cursor/skills"),
-                },
-                "cursor",
-                ".cursor/skills",
-            )
-            .item(
-                DestChoice::Preset {
-                    label: "agents",
-                    path: PathBuf::from(".agents/skills"),
-                },
-                "agents",
-                ".agents/skills",
-            );
-    } else {
-        for p in existing {
-            let display = p.display().to_string();
-            prompt = prompt.item(DestChoice::Existing(p), display, "");
-        }
-    }
-    prompt = prompt.item(DestChoice::Custom, "Custom path…", "type your own");
-
-    let answer = prompt.interact()?;
-    match answer {
-        DestChoice::Existing(p) => Ok(p),
-        DestChoice::Preset { path, .. } => Ok(path),
-        DestChoice::Custom => {
-            let typed: String = input("Path")
-                .placeholder(".claude/skills")
-                .validate(|s: &String| {
-                    if s.trim().is_empty() {
-                        Err("path cannot be empty")
-                    } else {
-                        Ok(())
-                    }
-                })
-                .interact()?;
-            Ok(PathBuf::from(typed.trim()))
-        }
-    }
 }
 
 #[cfg(test)]
