@@ -15,7 +15,8 @@ A *skill* is any folder containing a `SKILL.md` file — read as instructions an
 
 - **Libraries, many projects.** Keep your skills in git repos. Install any subset into a project with `skillctl add` — from your personal library, a team library, or ad-hoc from any repo URL.
 - **Edits where they happen.** Tweak a skill in the heat of a project, then `skillctl push` to send the improvements back to the library it came from.
-- **Local skills surfaced.** Wrote something new locally? `skillctl detect` finds it and contributes it upstream.
+- **Update everywhere at once.** Fixed a shared skill? `skillctl propagate` (or `push --propagate`) refreshes it in every other project on disk that installed it — no per-project `pull`.
+- **Local skills surfaced.** Wrote something new locally? `skillctl detect` finds it and contributes it upstream — or scaffold a fresh one with `skillctl create`.
 - **Many libraries, with access levels.** Configure several libraries — `read` (consume only), `write` (commit directly), or `pr` (push a branch and open a PR/MR) — across GitHub, GitLab, and self-hosted git. `pull`/`push` follow each skill back to the library it came from.
 - **Safety built in.** Skills installed from a non-default source are content-audited (`skillctl audit`); the git transport is locked to HTTPS/SSH; untrusted manifest fields are sanitised.
 - **Conflicts handled.** On divergence, choose overwrite, fork-as-new, fork-locally, or skip — per-skill, per-flow.
@@ -32,7 +33,9 @@ The library stays the source of truth; your skills evolve where you use them.
 | `list`                        | library → ø       | Inventory with tags + descriptions; `--from all` spans every library. |
 | `push`                        | project → library | Diff local edits and commit them back to each skill's own library. `--to` promotes into another writable library. |
 | `pull`                        | library → project | Refresh installed skills from their own library; fork-locally on divergence. |
+| `propagate`                   | library → projects | Refresh a skill in every project on disk that installed it (`push --propagate` does it in one step). |
 | `detect`                      | project → library | Walk the project for new `SKILL.md` files and contribute them (`--to <lib>`). |
+| `create`                      | ø → project       | Scaffold a new skill folder with a template `SKILL.md`.          |
 | `library`                     | config            | Add/list/remove configured libraries and set the default.        |
 | `audit`                       | content           | Scan skill content for dangerous patterns and report a verdict.  |
 | `tag`                         | project           | Add/remove tags on a project skill's `SKILL.md` frontmatter.     |
@@ -101,9 +104,11 @@ The interactive `add` / `push` / `pull` / `detect` show a multi-select with a li
 - **`skillctl init <url>`** — clone your first library into a local cache and mark it the default. Accepts GitHub, GitLab, and self-hosted URLs (HTTPS or SSH).
 - **`skillctl list`** — print every skill in the library, with its tags and description. `--from <name>` lists another library; `--from all` spans every configured one.
 - **`skillctl add`** — multi-select skills and copy them into the current project (recorded in `.skills.toml`). `--from <name>` installs from a named library; `--from <url>` (or `github:owner/repo`) installs ad-hoc from any repo, with `--save-as` to keep it as a library.
-- **`skillctl push`** — push local edits back to each skill's own library. On a diverged skill, choose overwrite, fork-as-new, or skip. `--to <lib>` promotes a skill into another writable library. Pushing to a `pr` library opens a PR/MR.
+- **`skillctl push`** — push local edits back to each skill's own library. On a diverged skill, choose overwrite, fork-as-new, or skip. `--to <lib>` promotes a skill into another writable library. Pushing to a `pr` library opens a PR/MR. `--propagate` also refreshes each pushed skill in every other project on disk that installed it.
 - **`skillctl pull`** — refresh installed skills with updates from their own library. On a diverged skill, choose overwrite, fork-locally, or skip.
+- **`skillctl propagate <skill>…`** — refresh a library's current version of a skill in every *other* project that installed it, discovered by scanning `--root <path>` (or the configured `[propagate] roots`) for `.skills.toml`. Sites with local edits are skipped, never clobbered; `--dry-run` previews.
 - **`skillctl detect`** — find local skills not yet in `.skills.toml` and add them to a chosen writable library (`--to <lib>`).
+- **`skillctl create <name>`** — scaffold a new skill folder with a template `SKILL.md` (frontmatter + body skeleton) in the current project, ready for `detect` to contribute later.
 - **`skillctl library add|list|remove|set-default`** — manage configured libraries (each `read` / `write` / `pr`).
 - **`skillctl audit`** — scan skill content for dangerous patterns (credentials, obfuscation, risky shell, prompt-injection) and report a verdict.
 - **`skillctl tag add|remove <tag>… --skill <name>`** — edit a project skill's frontmatter tags from the CLI.
@@ -150,9 +155,10 @@ Every interactive flow has flag-driven equivalents so an LLM agent can drive the
 
 - Selection: `--skill <name>` (repeatable), `--all`, or `--tag <name>`.
 - Source / target: `--from <name|url>` / `--from all` (add, list), `--to <lib>` (push promotion, detect), `--save-as <name>` (ad-hoc remote add).
-- Destination: `--dest <path>` (add), `--target <library-path>` (detect).
+- Destination: `--dest <path>` (add, create), `--target <library-path>` (detect).
 - Conflict resolution: `--on-conflict overwrite|skip|abort` (add), `--on-divergence overwrite|skip|fork` (push, pull) with `--fork-suffix <s>` for non-interactive forks.
-- Audit: `--no-audit` / `--fail-on <severity>` (add, audit).
+- Audit: `--no-audit` / `--fail-on <severity>` (add, pull, detect, audit).
+- Propagation: `--propagate` + `--root <path>` (push); standalone `skillctl propagate <skill>… --root <path>` with `--dry-run`. Scan roots fall back to `[propagate] roots` in `config.toml` when `--root` is omitted.
 - PR/MR: `--pr-title <title>` and `--yes` (push to a `pr` library).
 - Output: `--json` emits a structured object on stdout (cliclack output suppressed).
 - `--no-interaction` forces non-interactive mode on a TTY.
