@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`skillctl usage`** — install (or refresh) the agent-facing `skillctl-usage` reference skill into the current project. **Fully decoupled from libraries**: no configured library, cache, network, or `.skills.toml` entry — the `SKILL.md` is **bundled into the binary** (`include_str!`), so the installed copy always matches your installed skillctl version. Re-running updates it in place, reporting `installed` / `updated` / `up-to-date`. The destination uses the same interactive picker as `add`/`create` (detected `skills/` folders + presets — harness-agnostic, not hardwired to `.claude/skills`); `--dest` is required non-interactively. Rejects `..`/absolute `--dest` and never writes through a symlink.
+
 ## [0.5.0] - 2026-07-10
 
 A feature release on top of v0.4.0's multi-library model. Everything below is backward-compatible new surface — every existing workflow is unchanged — so a minor bump.

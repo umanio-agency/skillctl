@@ -323,6 +323,20 @@ skillctl --json create my-skill --dest .claude/skills
 
 `skillctl create` writes a template `SKILL.md` — frontmatter (`name`, `description`, and an inline `tags: […]` array when tags are given) plus a body skeleton (`# <name>`, `## Instructions`, `## Examples`) — that skillctl's own parser reads back, so the new skill is immediately visible to `detect`/`add`/`audit`. It is **project-local**: no library, git, network, or `.skills.toml` entry (a created skill is untracked until `skillctl detect` publishes it to a library). Refuses to overwrite an existing folder (exit 3). The `--json` shape is `{ "command": "create", "name": "…", "path": "…", "created": true }`.
 
+### `skillctl usage` — install this reference into a project
+
+```sh
+skillctl usage --dest .claude/skills   # or .codex/skills, .cursor/skills, …
+skillctl usage                         # interactive: pick from detected skills/ folders + presets
+skillctl --json usage --dest .claude/skills
+```
+
+| Flag | Purpose | Required in non-interactive |
+|---|---|---|
+| `--dest <path>` | Directory to install into, relative to the project root; the skill lands at `<dest>/skillctl-usage/SKILL.md`. Interactive picks from detected `skills/` folders or the presets (claude/codex/cursor/agents) — same resolver as `add`/`create`, so it stays harness-agnostic. Rejects `..`; absolute paths are rejected in non-interactive mode. | **Yes** |
+
+`skillctl usage` drops (or refreshes) this very reference skill into the current project so a project's agent can pick it up. It is **fully decoupled from libraries**: no configured library, cache, network, or `.skills.toml` entry is involved — the `SKILL.md` is **bundled into the binary**, so the installed copy always matches your installed skillctl version. The destination uses the **same interactive picker as `add`/`create`** (detected `skills/` folders + presets), so it isn't tied to any one agent harness; non-interactive runs must pass `--dest`. Re-running after `brew upgrade` (etc.) updates it in place: `status` is `installed` (was absent), `updated` (content changed), or `up-to-date` (byte-identical — nothing written). Never writes through a symlink. The `--json` shape is `{ "command": "usage", "skill": "skillctl-usage", "version": "…", "path": "…", "status": "installed"|"updated"|"up-to-date" }`.
+
 ### `skillctl propagate` — push a library update into every project that has it
 
 ```sh

@@ -46,6 +46,11 @@ pub enum Command {
     /// Push a library's current version of a skill into every project on disk
     /// that installed it (discovered by scanning for `.skills.toml`).
     Propagate(PropagateArgs),
+    /// Install or update the `skillctl-usage` skill (the agent-facing CLI
+    /// reference) in the current project. Needs no configured library — the
+    /// content is bundled with this binary, so it always matches your
+    /// installed version; re-run after upgrading skillctl to refresh it.
+    Usage(UsageArgs),
     /// Manage configured skill libraries (read sources + write targets).
     #[command(subcommand)]
     Library(LibraryCommand),
@@ -408,6 +413,16 @@ pub struct PropagateArgs {
     /// Preview which projects would be updated without writing anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct UsageArgs {
+    /// Directory to install into, relative to the project root (e.g.
+    /// `.codex/skills`). The skill lands at `<dest>/skillctl-usage/SKILL.md`.
+    /// Required in non-interactive mode; interactive picks from detected
+    /// `skills/` folders or the presets (same as `add`/`create`).
+    #[arg(long, value_name = "PATH")]
+    pub dest: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

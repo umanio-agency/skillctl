@@ -36,6 +36,7 @@ The library stays the source of truth; your skills evolve where you use them.
 | `propagate`                   | library → projects | Refresh a skill in every project on disk that installed it (`push --propagate` does it in one step). |
 | `detect`                      | project → library | Walk the project for new `SKILL.md` files and contribute them (`--to <lib>`). |
 | `create`                      | ø → project       | Scaffold a new skill folder with a template `SKILL.md`.          |
+| `usage`                       | ø → project       | Install/refresh the agent-facing skillctl reference skill (bundled in the binary — no library needed). |
 | `library`                     | config            | Add/list/remove configured libraries and set the default.        |
 | `audit`                       | content           | Scan skill content for dangerous patterns and report a verdict.  |
 | `tag`                         | project           | Add/remove tags on a project skill's `SKILL.md` frontmatter.     |
@@ -109,6 +110,7 @@ The interactive `add` / `push` / `pull` / `detect` show a multi-select with a li
 - **`skillctl propagate <skill>…`** — refresh a library's current version of a skill in every *other* project that installed it, discovered by scanning `--root <path>` (or the configured `[propagate] roots`) for `.skills.toml`. Sites with local edits are skipped, never clobbered; `--dry-run` previews.
 - **`skillctl detect`** — find local skills not yet in `.skills.toml` and add them to a chosen writable library (`--to <lib>`).
 - **`skillctl create <name>`** — scaffold a new skill folder with a template `SKILL.md` (frontmatter + body skeleton) in the current project, ready for `detect` to contribute later.
+- **`skillctl usage`** — install (or refresh) the agent-facing skillctl reference skill into the current project. Needs no configured library — the content is **bundled with the binary**, so it always matches your installed version; re-run after upgrading to update it in place. The destination uses the same interactive picker as `add`/`create` (detected `skills/` folders + presets), so it isn't tied to any one harness; `--dest <path>` for a non-interactive target.
 - **`skillctl library add|list|remove|set-default`** — manage configured libraries (each `read` / `write` / `pr`).
 - **`skillctl audit`** — scan skill content for dangerous patterns (credentials, obfuscation, risky shell, prompt-injection) and report a verdict.
 - **`skillctl tag add|remove <tag>… --skill <name>`** — edit a project skill's frontmatter tags from the CLI.
@@ -165,7 +167,7 @@ Every interactive flow has flag-driven equivalents so an LLM agent can drive the
 
 Stable exit codes: `0` success (incl. nothing-to-do), `1` generic, `2` config (missing flag, no library, etc.), `3` conflict, `4` git error, `5` content-audit threshold exceeded.
 
-The full agent contract — flag matrix per command, JSON shapes, recipes, failure modes — lives in [`.claude/skills/skillctl-usage/SKILL.md`](.claude/skills/skillctl-usage/SKILL.md). It's installable into any project via `skillctl add` so the project's agent picks it up.
+The full agent contract — flag matrix per command, JSON shapes, recipes, failure modes — lives in [`.claude/skills/skillctl-usage/SKILL.md`](.claude/skills/skillctl-usage/SKILL.md). Install it into any project with **`skillctl usage`** (bundled in the binary, no library needed) so the project's agent picks it up; re-run it after upgrading skillctl to refresh the copy.
 
 ## Using skillctl alongside `npx skills`
 
