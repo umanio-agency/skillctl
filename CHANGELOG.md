@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-10
+
+A feature release on top of v0.4.0's multi-library model. Everything below is backward-compatible new surface — every existing workflow is unchanged — so a minor bump.
+
+### Added
+
+- **`skillctl propagate <skill>…` and `push --propagate`** — fan a library's current version of a skill out to every *other* project on disk that installed it ("fix once, updated everywhere"). Install sites are discovered by **scanning for `.skills.toml`** (crate `ignore`: prunes `node_modules`/`target`/`.git`, honours `.gitignore`) — no central registry to maintain, so it self-heals when a project is moved, cloned, or freshly added. For each matching site it replays `pull`'s classification: a site cleanly behind the library is **updated** (folder replaced + `source_sha` rewritten), a site with **local edits is skipped and reported** (never clobbered), an up-to-date site is a noop, and a site from another library is untouched. `--dry-run` previews. **`push --propagate`** runs the same fan-out in one step right after a successful push — only round-trip *updates* propagate (forks and `--to` promotions don't), and the project you pushed from is skipped (already at HEAD). Scan roots come from `--root <path>` (repeatable) or the new **`[propagate] roots`** section in `config.toml` (omitted from the file while empty).
+- **`skillctl create <name>`** — scaffold a new skill folder with a template `SKILL.md` (frontmatter `name`/`description`/optional inline `tags` + a body skeleton) that round-trips through skillctl's own parser, so the skill is immediately visible to `detect`/`add`/`audit`. Project-local (no library, git, or network); refuses to overwrite an existing folder (exit 3). Interactive location picker, or `--dest` non-interactively; `--description` / `--tag` optional.
+- **Content audit now gates `pull` and `detect`.** The Phase-10C audit engine — previously run only on `add` / remote install — now also scans the **incoming** library version on `pull` (before it overwrites local content) and **local** content on `detect` (before it's published to a possibly shared library). Warn-only by default; `--fail-on <severity>` refuses the whole batch atomically (exit 5, nothing written); `--no-audit` skips. `audit_verdict` per skill in `--json`.
+- **Interactive batch-triage for flagged content.** When an interactive warn-only run flags one or more skills (verdict ≥ `warning`), `add` / `pull` / `detect` present a menu before applying: *Decide for each* (include / skip / view findings per skill), *Proceed with all*, or *Cancel everything* (nothing applied, exit 0). Non-flagged skills always proceed; `--fail-on` / `--no-audit` / non-interactive suppress the menu, so scripted and `--json` output is byte-identical.
+- **Tag meta-actions in the interactive picker.** Typing a query that matches a tag surfaces two actionable rows above the skill matches — `▸ tag:<name> — filter to N` (enter a tag-filter mode) and `▸ tag:<name> — select all N` (check every carrier) — the interactive equivalent of `--tag` / `--all-tags`, in `add` / `pull` / `detect` / `push`.
+
+### Security
+
+- Inbound library content is now audited **before it lands**: `pull` scans the exact bytes it's about to write (the same `safe_join` runs in the audit pre-pass and the write loop, so no skill can bypass the scan), and `--no-audit` is refused on `pull` for non-default (third-party) provenance. `propagate` reuses `pull`'s hardened apply path — provenance matching **fail-closes** on an unparseable `library_url`, `safe_join` guards both the library read and the project write, and the site walker never follows symlinks.
+- Dependency remediation ahead of the release: `crossbeam-epoch` 0.9.18 → 0.9.20 (RUSTSEC-2026-0204, transitive via `ignore`), `anyhow` 1.0.102 → 1.0.103 (RUSTSEC-2026-0190 unsoundness advisory).
+
+Each addition went through the project's per-feature Phase-9 scoped security self-review (0 defects), plus end-to-end sandbox drivers exercising the real binary. `cargo test`: 264 pass; clippy clean; `cargo audit` clean.
+
 ## [0.4.0] - 2026-06-16
 
 Two additions on top of the v0.3.0 multi-remote model. Both are backward-compatible (new surface only).
